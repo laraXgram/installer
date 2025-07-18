@@ -1,0 +1,33 @@
+{
+    "name": "laraxgram/installer",
+    "description": "LaraGram application installer.",
+    "keywords": [
+        "laragram", "laravel", "laraquest"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "LaraXGram",
+            "email": "laraxgram@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "laraxgram/filesystem": "^3",
+        "laraxgram/support": "^3",
+        "laraxgram/console": "^3"
+    },
+    "bin": [
+        "bin/laragram"
+    ],
+    "autoload": {
+        "psr-4": {
+            "LaraGram\\Installer\\Console\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
