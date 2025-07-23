@@ -112,7 +112,7 @@ FLAG
                 confirm(
                     label: "Do you want to use LaraGram Surge?",
                     default: false,
-                    validate: function ($value){
+                    validate: function ($value) {
                         return $value && !(extension_loaded('swoole') || extension_loaded('openswoole'))
                             ? 'Extension Swoole/OpenSwoole not exist.'
                             : null;
@@ -237,10 +237,12 @@ FLAG
     {
         $token = password(
             label: 'Enter your Bot Token: ',
+            hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
         );
 
         $url = text(
             label: 'Enter your Bot URL: ',
+            hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
         );
 
         $this->replaceInFile(
