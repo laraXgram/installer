@@ -2,7 +2,7 @@
     "name": "laraxgram/installer",
     "description": "LaraGram application installer.",
     "keywords": [
-        "laragram", "laravel", "laraquest"
+        "laragram"
     ],
     "license": "MIT",
     "authors": [
@@ -12,10 +12,11 @@
         }
     ],
     "require": {
-        "php": "^8.2",
-        "laraxgram/filesystem": "^3",
-        "laraxgram/support": "^3",
-        "laraxgram/console": "^3"
+        "php": "^8.3",
+        "laraxgram/filesystem": "^4",
+        "laraxgram/support": "^4",
+        "laraxgram/console": "^4",
+      "ext-curl": "*"
     },
     "bin": [
         "bin/laragram"

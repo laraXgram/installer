@@ -19,8 +19,6 @@ trait ConfiguresPrompts
     /**
      * Configure the prompt fallbacks.
      *
-     * @param  \LaraGram\Console\Input\InputInterface  $input
-     * @param  \LaraGram\Console\Output\OutputInterface  $output
      * @return void
      */
     protected function configurePrompts(InputInterface $input, OutputInterface $output)
@@ -102,7 +100,7 @@ trait ConfiguresPrompts
      * @param  \Closure  $prompt
      * @param  bool|string  $required
      * @param  \Closure|null  $validate
-     * @param  \LaraGram\Console\Output\OutputInterface  $output
+     * @param  OutputInterface  $output
      * @return mixed
      */
     protected function promptUntilValid($prompt, $required, $validate, $output)
