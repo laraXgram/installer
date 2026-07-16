@@ -600,7 +600,7 @@ class NewCommand extends Command
                         Element::numberedList($getStartedSteps),
                         $output->getFormatter()->format('<options=bold>New to LaraGram?</>')
                         .' Check out our '.Element::link(
-                            'https://laraxgram.githun.io/installation#next-steps',
+                            'https://laraxgram.github.io/installation#next-steps',
                             'documentation'
                         ).'.',
                         Element::heading('Build something amazing!'),
@@ -608,7 +608,7 @@ class NewCommand extends Command
                 );
             } else {
                 $output->writeln('');
-                $output->writeln(' <fg=cyan;options=bold>New to LaraGram?</> Check out our <href=https://laraxgram.githun.io/installation#next-steps;options=underscore>documentation</>. <options=bold>Build something amazing!</>');
+                $output->writeln(' <fg=cyan;options=bold>New to LaraGram?</> Check out our <href=https://laraxgram.github.io/installation#next-steps;options=underscore>documentation</>. <options=bold>Build something amazing!</>');
                 $output->writeln('');
             }
         }
@@ -633,17 +633,19 @@ class NewCommand extends Command
                 hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
             );
 
-            if ($apiId !== '' || $apiHash !== '') {
-                $envContent = "\nTELEGRAM_API_ID=\"{$apiId}\"\nTELEGRAM_API_HASH=\"{$apiHash}\"\n";
-                file_put_contents($directory.'/.env', $envContent, FILE_APPEND);
-                file_put_contents($directory.'/.env.example', $envContent, FILE_APPEND);
+            if ($apiId !== '') {
+                $this->pregReplaceInFile('/^API_ID=.*/m', "API_ID=\"{$apiId}\"", $directory.'/.env');
             }
 
-            if ($apiId !== '' && $apiHash !== '') {
-                $this->runCommands([
-                    'Authenticating client' => $this->phpBinary() . ' laragram client:auth'
-                ], $input, $output, workingPath: $directory, taskLabel: 'Authenticating Telegram Client');
+            if ($apiHash !== '') {
+                $this->pregReplaceInFile('/^API_HASH=.*/m', "API_HASH=\"{$apiHash}\"", $directory.'/.env');
             }
+
+            $this->runCommands([
+                $this->phpBinary(). ' vendor/bin/compile-tl.php',
+                $this->phpBinary(). ' laragram install:client',
+                $this->phpBinary() . ' laragram vendor:publish --tag=mtproto-config'
+            ], $input, $output, workingPath: $directory, taskLabel: "Initialize MTProto");
         } else {
             // Get credentials for standard Bot token and webhook
             $token = password(
@@ -656,22 +658,20 @@ class NewCommand extends Command
                 hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
             );
 
-            if ($token !== '' || $url !== '') {
-                $envContent = "\nBOT_TOKEN=\"{$token}\"\nBOT_URL=\"{$url}\"\n";
-                file_put_contents($directory.'/.env', $envContent, FILE_APPEND);
-                file_put_contents($directory.'/.env.example', $envContent, FILE_APPEND);
+            if ($token !== '') {
+                $this->pregReplaceInFile('/^BOT_TOKEN=.*/m', "BOT_TOKEN=\"{$token}\"", $directory.'/.env');
+            }
 
-                if (file_exists($directory . "/config/bot.php")) {
-                    $this->replaceInFile("'token' => '',", "'token' => '$token',", $directory . "/config/bot.php");
-                    $this->replaceInFile("'url' => '',", "'url' => '$url',", $directory . "/config/bot.php");
-                }
+            if ($url !== '') {
+                $this->pregReplaceInFile('/^BOT_URL=.*/m', "BOT_URL=\"{$url}\"", $directory.'/.env');
             }
 
             if ($token !== '' && $url !== '') {
                 if (confirm(label: "Do you want to set webhook?")) {
+                    // Running webhook set directly to ensure reliable interactive inputs
                     $this->runCommands([
-                        'Setting webhook' => $this->phpBinary() . " laragram web:set"
-                    ], $input, $output, workingPath: $directory, taskLabel: 'Setting up Telegram Webhook');
+                        $this->phpBinary() . " laragram webhook:set"
+                    ], $input, $output, workingPath: $directory);
                 }
             }
         }
@@ -910,10 +910,6 @@ class NewCommand extends Command
     {
         [$packageManager, $runPackageManager] = $this->determinePackageManager($directory, $input);
         $this->configureComposerScripts($packageManager);
-
-        if (! $this->useConciseOutput($output)) {
-            $output->writeln('');
-        }
 
         if (! $runPackageManager && $input->isInteractive()) {
             $runPackageManager = confirm(
