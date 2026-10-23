@@ -753,8 +753,9 @@ class NewCommand extends Command
     {
         $composer = $this->findComposer();
 
+        // MTProto requires Surge itself, so Composer picks a Surge version MTProto supports...
         $packages = array_keys(array_filter([
-            'laraxgram/surge' => $input->getOption('surge') !== false,
+            'laraxgram/surge' => $input->getOption('surge') !== false && ! $input->getOption('mtproto'),
             'laraxgram/mtproto' => $input->getOption('mtproto'),
         ]));
 
@@ -1611,7 +1612,10 @@ class NewCommand extends Command
                         if (! $process->isSuccessful()) {
                             $logger->error($label);
                             $logger->error('Command failed: '.$command);
-                            $logger->error('Error output: '.trim($process->getErrorOutput()));
+
+                            foreach ($this->errorOutputTail($process) as $line) {
+                                $logger->error($line);
+                            }
 
                             return $process;
                         }
@@ -1627,6 +1631,27 @@ class NewCommand extends Command
                 return $process;
             },
         );
+    }
+
+    /**
+     * Get the last meaningful lines of the error output of the given process.
+     *
+     * Composer and PHP prefix the real error with deprecation notices and hints, which are skipped.
+     *
+     * @return list<string>
+     */
+    protected function errorOutputTail(Process $process, int $lines = 12): array
+    {
+        $output = trim($process->getErrorOutput()) ?: trim($process->getOutput());
+
+        $relevant = array_values(array_filter(
+            array_map('rtrim', preg_split('/\R/', $output)),
+            fn ($line) => trim($line) !== ''
+                && ! str_starts_with(trim($line), 'Deprecation Notice:')
+                && ! str_starts_with(trim($line), 'More deprecation notices were hidden'),
+        ));
+
+        return array_slice($relevant, -$lines) ?: ['No error output.'];
     }
 
     /**
