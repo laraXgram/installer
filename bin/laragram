@@ -7,7 +7,7 @@ if (file_exists(__DIR__.'/../../../autoload.php')) {
     require __DIR__.'/../vendor/autoload.php';
 }
 
-$app = new LaraGram\Console\ExtendedApplication('LaraGram Installer', '1.1.0');
+$app = new LaraGram\Console\ExtendedApplication('LaraGram Installer', '1.2.0');
 
 if (method_exists($app, 'addCommand')) {
     $app->addCommand(new LaraGram\Installer\Console\NewCommand);

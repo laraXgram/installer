@@ -13,10 +13,10 @@
     ],
     "require": {
         "php": "^8.3",
-        "laraxgram/filesystem": "^4",
-        "laraxgram/support": "^4",
-        "laraxgram/console": "^4",
-      "ext-curl": "*"
+        "laraxgram/filesystem": "^4.5",
+        "laraxgram/support": "^4.5",
+        "laraxgram/console": "^4.5",
+        "ext-curl": "*"
     },
     "bin": [
         "bin/laragram"

@@ -7,8 +7,10 @@ use LaraGram\Console\Input\InputArgument;
 use LaraGram\Console\Input\InputInterface;
 use LaraGram\Console\Input\InputOption;
 use LaraGram\Console\Output\OutputInterface;
+use LaraGram\Console\Process\ExecutableFinder;
 use LaraGram\Console\Process\Process;
 use LaraGram\Console\Prompts\Elements\Element;
+use LaraGram\Console\Prompts\Prompt;
 use LaraGram\Console\Prompts\Support\Logger;
 use LaraGram\Filesystem\Filesystem;
 use LaraGram\Installer\Console\Enums\NodePackageManager;
@@ -19,19 +21,24 @@ use LaraGram\Support\Str;
 use RuntimeException;
 use Throwable;
 
-use function LaraGram\Filesystem\join_paths;
 use function LaraGram\Console\Prompts\callout;
 use function LaraGram\Console\Prompts\confirm;
+use function LaraGram\Console\Prompts\form;
 use function LaraGram\Console\Prompts\password;
-use function LaraGram\Console\Prompts\select;
 use function LaraGram\Console\Prompts\task;
 use function LaraGram\Console\Prompts\text;
+use function LaraGram\Filesystem\join_paths;
 
 class NewCommand extends Command
 {
     use Concerns\ConfiguresPrompts;
+    use Concerns\InteractsWithTelegram;
 
     const DATABASE_DRIVERS = ['mysql', 'mariadb', 'pgsql', 'sqlite', 'sqlsrv'];
+
+    const SURGE_SERVERS = ['swoole', 'roadrunner', 'frankenphp'];
+
+    const MTPROTO_EXTENSIONS = ['gmp', 'json', 'mbstring', 'openssl', 'sockets', 'zlib'];
 
     /**
      * The Composer instance.
@@ -41,7 +48,51 @@ class NewCommand extends Command
     protected $composer;
 
     /**
-     * Configure the command options and arguments.
+     * The agent context, encapsulating detection and JSON output behavior.
+     */
+    protected Agent $agent;
+
+    /**
+     * Whether the default database migrations should be run.
+     */
+    protected bool $migrate = true;
+
+    /**
+     * Detect agents, suppress interactive output, and emit a JSON result.
+     */
+    public function run(InputInterface $input, OutputInterface $output): int
+    {
+        $this->agent = new Agent;
+
+        if (! $this->agent->isActive()) {
+            return parent::run($input, $output);
+        }
+
+        $input->setInteractive(false);
+
+        $logOutput = $this->agent->openLog();
+
+        Prompt::setOutput($logOutput);
+
+        try {
+            $exitCode = parent::run($input, $logOutput);
+        } catch (Throwable $e) {
+            $this->agent->emitFailure(['error' => $e->getMessage()]);
+
+            return self::FAILURE;
+        }
+
+        if ($exitCode === self::SUCCESS) {
+            $this->agent->emitSuccess();
+        } else {
+            $this->agent->emitFailure();
+        }
+
+        return $exitCode;
+    }
+
+    /**
+     * Configure the command options.
      *
      * @return void
      */
@@ -54,28 +105,35 @@ class NewCommand extends Command
             ->addOption('dev', null, InputOption::VALUE_NONE, 'Install the latest "development" release')
             ->addOption('git', null, InputOption::VALUE_NONE, 'Initialize a Git repository')
             ->addOption('branch', null, InputOption::VALUE_REQUIRED, 'The branch that should be created for a new repository', $this->defaultBranch())
-            ->addOption('github', null, InputOption::VALUE_OPTIONAL, 'Create a new repository on GitHub', false)
+            ->addOption('github', null, InputOption::VALUE_OPTIONAL, 'Create a new repository on GitHub, optionally for the given owner or with the given "gh repo create" flags', false)
             ->addOption('organization', null, InputOption::VALUE_REQUIRED, 'The GitHub organization to create the new repository for')
-            ->addOption('database', null, InputOption::VALUE_REQUIRED, 'The database driver your application will use. Possible values are: ' . implode(', ', self::DATABASE_DRIVERS))
-            ->addOption('react', null, InputOption::VALUE_NONE, 'Install the React Starter Kit')
-            ->addOption('svelte', null, InputOption::VALUE_NONE, 'Install the Svelte Starter Kit')
-            ->addOption('vue', null, InputOption::VALUE_NONE, 'Install the Vue Starter Kit')
+            ->addOption('token', null, InputOption::VALUE_REQUIRED, 'The Telegram bot token from @BotFather')
+            ->addOption('bot-url', null, InputOption::VALUE_REQUIRED, 'The public HTTPS URL Telegram should send updates to')
+            ->addOption('webhook', null, InputOption::VALUE_NONE, 'Set the bot webhook after installation')
+            ->addOption('mtproto', null, InputOption::VALUE_NONE, 'Install MTProto for userbot / client development')
+            ->addOption('api-id', null, InputOption::VALUE_REQUIRED, 'The Telegram API ID from my.telegram.org')
+            ->addOption('api-hash', null, InputOption::VALUE_REQUIRED, 'The Telegram API hash from my.telegram.org')
+            ->addOption('database', null, InputOption::VALUE_REQUIRED, 'The database driver your application will use. Possible values are: '.implode(', ', self::DATABASE_DRIVERS))
+            ->addOption('surge', null, InputOption::VALUE_OPTIONAL, 'Install LaraGram Surge with the given server. Possible values are: '.implode(', ', self::SURGE_SERVERS), false)
+            ->addOption('react', null, InputOption::VALUE_NONE, 'Install the React Mini App starter kit')
+            ->addOption('svelte', null, InputOption::VALUE_NONE, 'Install the Svelte Mini App starter kit')
+            ->addOption('vue', null, InputOption::VALUE_NONE, 'Install the Vue Mini App starter kit')
+            ->addOption('using', null, InputOption::VALUE_OPTIONAL, 'Install a custom starter kit from a community maintained package')
             ->addOption('npm', null, InputOption::VALUE_NONE, 'Install and build NPM dependencies')
             ->addOption('pnpm', null, InputOption::VALUE_NONE, 'Install and build NPM dependencies via PNPM')
             ->addOption('bun', null, InputOption::VALUE_NONE, 'Install and build NPM dependencies via Bun')
             ->addOption('yarn', null, InputOption::VALUE_NONE, 'Install and build NPM dependencies via Yarn')
             ->addOption('no-node', null, InputOption::VALUE_NONE, 'Skip installing and building NPM dependencies')
-            ->addOption('using', null, InputOption::VALUE_OPTIONAL, 'Install a custom starter kit from a community maintained package')
-            ->addOption('surge', null, InputOption::VALUE_NONE, 'Use LaraGram Surge')
-            ->addOption('mtproto', null, InputOption::VALUE_NONE, 'Use MTProto for Client/Userbot development')
+            ->addOption('brain', null, InputOption::VALUE_NONE, 'Install LaraGram Brain to improve AI assisted coding')
+            ->addOption('no-brain', null, InputOption::VALUE_NONE, 'Skip LaraGram Brain installation')
             ->addOption('force', 'f', InputOption::VALUE_NONE, 'Forces install even if the directory already exists');
     }
 
     /**
-     * Interact with the user and gather installation preferences.
+     * Interact with the user before validating the input.
      *
-     * @param \LaraGram\Console\Input\InputInterface $input
-     * @param \LaraGram\Console\Output\OutputInterface $output
+     * Every question is asked up front, so the installation itself runs unattended.
+     *
      * @return void
      */
     protected function interact(InputInterface $input, OutputInterface $output)
@@ -87,10 +145,22 @@ class NewCommand extends Command
         $this->ensureExtensionsAreAvailable($input, $output);
         $this->checkForUpdate($input, $output);
 
+        if ($input->getArgument('name') && $input->getOption('force') !== true) {
+            $this->verifyApplicationDoesntExist(
+                $this->getInstallationDirectory($input->getArgument('name'))
+            );
+        }
+
+        if (! $input->getOption('no-brain')) {
+            $input->setOption('brain', true);
+        }
+
+        $form = form();
+
         if (! $input->getArgument('name')) {
-            $input->setArgument('name', text(
+            $form->text(
                 label: 'What is the name of your project?',
-                placeholder: 'E.g. example-app',
+                placeholder: 'E.g. example-bot',
                 required: 'The project name is required.',
                 validate: function ($value) use ($input) {
                     if (preg_match('/[^\pL\pN\-_.]/', $value) !== 0) {
@@ -105,7 +175,145 @@ class NewCommand extends Command
                         }
                     }
                 },
-            ));
+                name: 'name',
+            );
+        }
+
+        // Mini App starter kit...
+        if (! $this->usingStarterKit($input)) {
+            $form->select(
+                label: 'Would you like to build a Telegram Mini App?',
+                options: [
+                    'none' => 'No',
+                    'react' => 'Yes, with React',
+                    'vue' => 'Yes, with Vue',
+                    'svelte' => 'Yes, with Svelte',
+                ],
+                default: 'none',
+                name: 'starterKit',
+            );
+        }
+
+        // Bot API...
+        if (! $input->getOption('token')) {
+            $form->password(
+                label: 'What is your bot token?',
+                validate: fn ($value) => $value === '' ? null : $this->verifyBotToken($value),
+                hint: 'Get one from @BotFather, or press Enter to skip.',
+                name: 'token',
+            );
+        }
+
+        if (! $input->getOption('bot-url')) {
+            $form->addIf(
+                fn ($responses) => ($responses['token'] ?? $input->getOption('token')) !== '',
+                fn ($responses, $previousResponse) => text(
+                    label: 'What is the public URL of your bot?',
+                    placeholder: 'E.g. https://example.com',
+                    default: $previousResponse ?? '',
+                    validate: fn ($value) => $value === '' || $this->isValidWebhookUrl($value)
+                        ? null
+                        : 'The URL must be a valid HTTPS URL.',
+                    hint: 'Telegram sends updates to this URL. Press Enter to skip.',
+                ),
+                name: 'botUrl',
+            );
+        }
+
+        if (! $input->getOption('webhook')) {
+            $form->addIf(
+                fn ($responses) => ($responses['token'] ?? $input->getOption('token')) !== ''
+                    && ($responses['botUrl'] ?? $input->getOption('bot-url')) !== '',
+                fn ($responses, $previousResponse) => confirm(
+                    label: 'Would you like to set the webhook after installation?',
+                    default: $previousResponse ?? true,
+                ),
+                name: 'webhook',
+            );
+        }
+
+        // MTProto...
+        if (! $input->getOption('mtproto')) {
+            $form->confirm(
+                label: 'Would you like to use MTProto for userbot / client development?',
+                default: false,
+                validate: fn ($value) => $value ? $this->missingExtensionsMessage('MTProto', self::MTPROTO_EXTENSIONS) : null,
+                name: 'mtproto',
+            );
+        }
+
+        if (! $input->getOption('api-id')) {
+            $form->addIf(
+                fn ($responses) => $responses['mtproto'] ?? $input->getOption('mtproto'),
+                fn ($responses, $previousResponse) => text(
+                    label: 'What is your Telegram API ID?',
+                    default: $previousResponse ?? '',
+                    validate: fn ($value) => $value === '' || ctype_digit($value) ? null : 'The API ID must be numeric.',
+                    hint: 'Get it from my.telegram.org, or press Enter to skip.',
+                ),
+                name: 'apiId',
+            );
+        }
+
+        if (! $input->getOption('api-hash')) {
+            $form->addIf(
+                fn ($responses) => $responses['mtproto'] ?? $input->getOption('mtproto'),
+                fn () => password(
+                    label: 'What is your Telegram API hash?',
+                    validate: fn ($value) => $value === '' || preg_match('/^[a-f0-9]{32}$/i', $value) === 1
+                        ? null
+                        : 'The API hash must be a 32 character hexadecimal string.',
+                    hint: 'Get it from my.telegram.org, or press Enter to skip.',
+                ),
+                name: 'apiHash',
+            );
+        }
+
+        // Database...
+        if (! $input->getOption('database')) {
+            $form->select(
+                label: 'Which database will your application use?',
+                options: $this->databaseOptions(),
+                default: 'sqlite',
+                validate: fn ($value) => extension_loaded($this->pdoExtension($value))
+                    ? null
+                    : "The [{$this->pdoExtension($value)}] extension is required for this database.",
+                name: 'database',
+            );
+
+            $form->addIf(
+                fn ($responses) => $responses['database'] !== 'sqlite',
+                fn ($responses, $previousResponse) => confirm(
+                    label: 'Would you like to run the default database migrations?',
+                    default: $previousResponse ?? true,
+                    hint: 'Make sure the database server is running and the database exists.',
+                ),
+                name: 'migrate',
+            );
+        }
+
+        // Surge...
+        if ($input->getOption('surge') === false) {
+            $form->select(
+                label: 'Would you like to use LaraGram Surge?',
+                options: [
+                    'none' => 'No',
+                    'swoole' => 'Yes, with Swoole / OpenSwoole',
+                    'roadrunner' => 'Yes, with RoadRunner',
+                    'frankenphp' => 'Yes, with FrankenPHP',
+                ],
+                default: 'none',
+                validate: fn ($value) => $value === 'swoole' && ! $this->swooleIsAvailable()
+                    ? 'The Swoole or OpenSwoole extension is required for this server.'
+                    : null,
+                name: 'surge',
+            );
+        }
+
+        $responses = $form->submit();
+
+        if (isset($responses['name'])) {
+            $input->setArgument('name', $responses['name']);
         }
 
         if ($input->getOption('force') !== true) {
@@ -114,103 +322,38 @@ class NewCommand extends Command
             );
         }
 
-        // Set default fast options...
-        if (! $input->getOption('database')) {
-            $input->setOption('database', 'sqlite');
-        }
+        match ($responses['starterKit'] ?? 'none') {
+            'react' => $input->setOption('react', true),
+            'vue' => $input->setOption('vue', true),
+            'svelte' => $input->setOption('svelte', true),
+            default => null,
+        };
 
-        if (! $input->getOption('no-node') &&
-            ! $input->getOption('pnpm') &&
-            ! $input->getOption('bun') &&
-            ! $input->getOption('yarn')) {
-            $input->setOption('npm', true);
-        }
-
-        // Surge interaction flow
-        if (!$this->usingSurge($input)) {
-            $useSurge = confirm(
-                label: "Do you want to use LaraGram Surge?",
-                default: false,
-                hint: "This option requires either Swoole or OpenSwoole extension."
-            );
-
-            if ($useSurge) {
-                // Modified select prompt with direct validation to prevent submission of unavailable drivers
-                select(
-                    label: 'Which driver do you want to use for LaraGram Surge?',
-                    options: [
-                        'swoole' => 'Swoole',
-                        'openswoole' => 'OpenSwoole',
-                    ],
-                    default: 'swoole',
-                    validate: function ($value) {
-                        if (!extension_loaded($value)) {
-                            return "The required extension [ext-{$value}] is not installed or enabled in your PHP configuration.";
-                        }
-                        return null;
-                    }
-                );
-
-                $input->setOption('surge', true);
+        foreach (['token' => 'token', 'botUrl' => 'bot-url', 'apiId' => 'api-id', 'apiHash' => 'api-hash', 'database' => 'database'] as $response => $option) {
+            if (($responses[$response] ?? '') !== '') {
+                $input->setOption($option, $responses[$response]);
             }
         }
 
-        // MTProto interaction flow
-        if (!$input->getOption('mtproto')) {
-            $useMtproto = confirm(
-                label: "Do you want to use MTProto?",
-                default: false,
-                hint: "Choose 'Yes' if you want to develop client-based userbots."
-            );
-
-            if ($useMtproto) {
-                // Pre-check MTProto specific extensions during interaction
-                $requiredMtproto = ['gmp', 'json', 'mbstring', 'openssl', 'sockets', 'zlib'];
-                $missingMtproto = array_filter($requiredMtproto, fn ($ext) => !extension_loaded($ext));
-                if (!empty($missingMtproto)) {
-                    throw new RuntimeException(
-                        sprintf('MTProto requires the following missing PHP extensions: %s', implode(', ', $missingMtproto))
-                    );
-                }
-
-                $input->setOption('mtproto', true);
-            }
+        if ($responses['webhook'] ?? false) {
+            $input->setOption('webhook', true);
         }
 
-        // TMA (Telegram Mini App) / Starter Kit interaction flow
-        if (! $this->usingStarterKit($input)) {
-            $useTma = confirm('Do you want to develop a Telegram Mini App (TMA)?', default: false);
+        if ($responses['mtproto'] ?? false) {
+            $input->setOption('mtproto', true);
+        }
 
-            if ($useTma) {
-                $stack = select(
-                    label: 'Which frontend stack do you want to build on?',
-                    options: [
-                        'react' => 'React',
-                        'vue' => 'Vue',
-                        'svelte' => 'Svelte',
-                    ],
-                    info: fn ($value) => match ($value) {
-                        'react' => 'LaraGram, Luna, React, Tailwind',
-                        'vue' => 'LaraGram, Luna, Vue, Tailwind',
-                        'svelte' => 'LaraGram, Luna, Svelte, Tailwind',
-                        default => '',
-                    },
-                    default: 'react',
-                    scroll: 10,
-                );
+        if (isset($responses['migrate'])) {
+            $this->migrate = $responses['migrate'];
+        }
 
-                match ($stack) {
-                    'react' => $input->setOption('react', true),
-                    'vue' => $input->setOption('vue', true),
-                    'svelte' => $input->setOption('svelte', true),
-                    default => null,
-                };
-            }
+        if (isset($responses['surge'])) {
+            $input->setOption('surge', $responses['surge'] === 'none' ? false : $responses['surge']);
         }
     }
 
     /**
-     * Display the LaraGram header banner with a balanced random color gradient.
+     * Display the LaraGram header with gradient colors.
      */
     protected function displayHeader(OutputInterface $output): void
     {
@@ -227,7 +370,6 @@ class NewCommand extends Command
             "                         \_____|_|  \__,_|_| |_| |_|",
         ];
 
-        // Fixed gradients so all 8 indexes flow cohesively with balanced styling
         $gradients = [
             'Red' => [196, 160, 124, 88, 52, 88, 124, 160],
             'Gray' => [255, 251, 247, 244, 241, 238, 244, 251],
@@ -239,49 +381,66 @@ class NewCommand extends Command
             'Cyberpunk' => [220, 190, 160, 112, 53, 57, 93, 112],
         ];
 
-        $themeName = array_rand($gradients);
-        $gradient = $gradients[$themeName];
+        $gradient = $gradients[array_rand($gradients)];
 
         foreach ($lines as $index => $line) {
-            $color = $gradient[$index];
-            $output->writeln("\e[38;5;{$color}m{$line}\e[0m");
+            $output->writeln("\e[38;5;{$gradient[$index]}m{$line}\e[0m");
         }
     }
 
     /**
-     * Ensure default and standard PHP extensions are available.
+     * Ensure that the required PHP extensions are installed.
      *
-     * @throws RuntimeException
+     * @throws \RuntimeException
      */
     protected function ensureExtensionsAreAvailable(InputInterface $input, OutputInterface $output): void
     {
-        $availableExtensions = get_loaded_extensions();
-
-        $missingExtensions = collect([
+        $message = $this->missingExtensionsMessage('LaraGram', [
             'ctype',
+            'curl',
             'filter',
             'hash',
+            'intl',
             'mbstring',
             'openssl',
             'session',
             'tokenizer',
-            'intl'
-        ])->reject(fn ($extension) => in_array($extension, $availableExtensions));
+        ]);
+
+        if ($message !== null) {
+            throw new RuntimeException($message);
+        }
+    }
+
+    /**
+     * Get the error message for the given missing PHP extensions, if any.
+     */
+    protected function missingExtensionsMessage(string $feature, array $extensions): ?string
+    {
+        $missingExtensions = collect($extensions)->reject(fn ($extension) => extension_loaded($extension));
 
         if ($missingExtensions->isEmpty()) {
-            return;
+            return null;
         }
 
-        throw new RuntimeException(
-            sprintf('The following PHP extensions are required but are not installed: %s', $missingExtensions->join(', ', ', and '))
+        return sprintf(
+            '%s requires the following PHP extensions, which are not installed: %s.',
+            $feature,
+            $missingExtensions->join(', ', ', and ')
         );
     }
 
     /**
-     * Check for newer versions of the LaraGram installer.
+     * Check for newer version of the installer package.
+     *
+     * @return void
      */
     protected function checkForUpdate(InputInterface $input, OutputInterface $output)
     {
+        if ($this->agent->isActive()) {
+            return;
+        }
+
         $package = 'laraxgram/installer';
         $version = $this->getApplication()->getVersion();
         $versionData = $this->getLatestVersionData($package);
@@ -297,6 +456,15 @@ class NewCommand extends Command
             return;
         }
 
+        if (getenv('LARAGRAM_INSTALLER_UPDATE_ATTEMPTED') === '1') {
+            putenv('LARAGRAM_INSTALLER_UPDATE_ATTEMPTED');
+
+            $output->writeln('');
+            $output->writeln("  <bg=yellow;fg=black> WARN </> The installer could not be updated to version {$latestVersion}. You may need to update manually. Continuing with the current version...");
+
+            return;
+        }
+
         $output->writeln('');
         $output->writeln("  <bg=yellow;fg=black> WARN </> A new version of the LaraGram installer is available. You have version {$version} installed, the latest version is {$latestVersion}.");
 
@@ -309,43 +477,31 @@ class NewCommand extends Command
                 $output,
                 taskLabel: 'Updating LaraGram installer',
             );
+
             $this->proxyLaraGramNew($input, $output);
         }
     }
 
     /**
-     * Confirm update actions and proceed.
-     */
-    protected function confirmUpdateAndContinue(string $message, InputInterface $input, OutputInterface $output): void
-    {
-        $output->writeln('');
-        $output->writeln("  {$message}");
-
-        $updated = confirm(
-            label: 'Would you like to update now?',
-            yes: 'I have updated',
-            no: 'Not now',
-        );
-
-        if (! $updated) {
-            return;
-        }
-
-        $this->proxyLaraGramNew($input, $output);
-    }
-
-    /**
-     * Proxy command call directly onto the newly updated global installer.
+     * Proxy the command to the globally installed LaraGram Installer.
      */
     protected function proxyLaraGramNew(InputInterface $input, OutputInterface $output): void
     {
         $output->writeln('');
-        $this->runCommands(['laragram '.$input], $input, $output, workingPath: getcwd());
+
+        $this->runCommands(
+            ['laragram '.$input],
+            $input,
+            $output,
+            workingPath: getcwd(),
+            env: ['LARAGRAM_INSTALLER_UPDATE_ATTEMPTED' => '1'],
+        );
+
         exit;
     }
 
     /**
-     * Fetch package data from Packagist.
+     * Get the latest version of the installer package from Packagist.
      */
     protected function getLatestVersionData(string $package): string|false
     {
@@ -360,10 +516,12 @@ class NewCommand extends Command
         $lastModifiedResponse = $lastModifiedExists ? file_get_contents($lastModifiedPath) : null;
 
         if ($cacheLastWrittenAt > time() - 86400) {
+            // Cache is less than 24 hours old, use it
             return file_get_contents($cachedPath);
         }
 
         $curl = curl_init();
+
         $headers = ['User-Agent: LaraGram Installer'];
 
         if ($lastModifiedResponse) {
@@ -408,11 +566,13 @@ class NewCommand extends Command
 
         if ($httpCode === 304 && $cacheExists) {
             touch($cachedPath);
+
             return file_get_contents($cachedPath);
         }
 
         if ($httpCode === 200 && $result !== false) {
             file_put_contents($cachedPath, $result);
+
             return $result;
         }
 
@@ -420,35 +580,20 @@ class NewCommand extends Command
     }
 
     /**
-     * Execute the installation of LaraGram application.
+     * Execute the command.
      */
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $this->validateDatabaseOption($input);
-
-        // Perform programmatic checks for Surge and MTProto requirements if passed through command options
-        if ($input->getOption('surge')) {
-            $hasSwoole = extension_loaded('swoole');
-            $hasOpenSwoole = extension_loaded('openswoole');
-            if (!$hasSwoole && !$hasOpenSwoole) {
-                throw new RuntimeException('LaraGram Surge requires either Swoole or OpenSwoole extension.');
-            }
-        }
-
-        if ($input->getOption('mtproto')) {
-            $requiredMtproto = ['gmp', 'json', 'mbstring', 'openssl', 'sockets', 'zlib'];
-            $missingMtproto = array_filter($requiredMtproto, fn ($ext) => !extension_loaded($ext));
-            if (!empty($missingMtproto)) {
-                throw new RuntimeException(
-                    sprintf('The MTProto component requires the following missing PHP extensions: %s', implode(', ', $missingMtproto))
-                );
-            }
-        }
+        $this->validateOptions($input);
 
         $name = rtrim($input->getArgument('name'), '/\\');
+
         $directory = $this->getInstallationDirectory($name);
 
+        $this->agent->rememberInstallation($directory);
+
         $this->composer = new Composer(new Filesystem, $directory);
+
         $version = $this->getVersion($input);
 
         if (! $input->getOption('force')) {
@@ -462,9 +607,9 @@ class NewCommand extends Command
         $composer = $this->findComposer();
         $phpBinary = $this->phpBinary();
 
-        // Match options to correct starter kits or standard installer package
-        $starterKit = $this->getStarterKit($input);
         $createProjectCommand = $composer." create-project laraxgram/laragram \"$directory\" $version --remove-vcs --prefer-dist --no-scripts";
+
+        $starterKit = $this->getStarterKit($input);
 
         if ($starterKit) {
             $createProjectCommand = $composer." create-project {$starterKit} \"{$directory}\" --stability=dev";
@@ -478,6 +623,7 @@ class NewCommand extends Command
 
         if ($directory != '.' && $input->getOption('force')) {
             $forceLabel = "Removed existing directory [{$name}]";
+
             if (PHP_OS_FAMILY == 'Windows') {
                 $commands[$forceLabel] = "(if exist \"$directory\" rd /s /q \"$directory\")";
             } else {
@@ -488,8 +634,9 @@ class NewCommand extends Command
         $commands['Application installed'] = $createProjectCommand;
 
         $appInitializedLabel = 'Application initialized';
+
         $commands[$appInitializedLabel] = [
-            $composer." run post-root-package-install -d \"$directory\"",
+            $composer." run-script post-root-package-install -d \"$directory\"",
             $phpBinary." \"$directory/laragram\" key:generate --ansi",
         ];
 
@@ -497,240 +644,262 @@ class NewCommand extends Command
             $commands[$appInitializedLabel][] = "chmod 755 \"$directory/laragram\"";
         }
 
-        // Install Application
-        if (($process = $this->runCommands(
+        if (! ($process = $this->runCommands(
             $commands,
             $input,
             $output,
+            // Starter kits need to defer execution of hooks until after create-project completes...
             env: ['LARAGRAM_INSTALLER_DEFER_HOOKS' => '1'],
             taskLabel: 'Creating LaraGram application',
         ))->isSuccessful()) {
-
-            // Install custom optional components (Surge and/or MTProto)
-            $additionalPackages = [];
-            if ($input->getOption('surge')) {
-                $additionalPackages[] = 'laraxgram/surge';
-            }
-            if ($input->getOption('mtproto')) {
-                $additionalPackages[] = 'laraxgram/mtproto';
-            }
-
-            if (!empty($additionalPackages)) {
-                $packagesList = implode(' ', $additionalPackages);
-                $this->runCommands(
-                    ['Installing additional packages' => $composer." require {$packagesList} -d \"{$directory}\" --no-interaction"],
-                    $input,
-                    $output,
-                    taskLabel: 'Installing additional LaraGram components'
-                );
-            }
-
-            $hooksProcess = $this->runInstallerHooks($directory, $input, $output);
-            if ($hooksProcess && ! $hooksProcess->isSuccessful()) {
-                return $hooksProcess->getExitCode();
-            }
-
-            if ($name !== '.') {
-                $this->pregReplaceInFile(
-                    '/^APP_URL=http:\/\/localhost$/m',
-                    'APP_URL=http://localhost:9000',
-                    $directory.'/.env'
-                );
-
-                [$database, $migrate] = $this->promptForDatabaseOptions($directory, $input);
-                $this->configureDefaultDatabaseConnection($directory, $database, $name);
-
-                if ($migrate) {
-                    if ($database === 'sqlite') {
-                        touch($directory.'/database/database.sqlite');
-                    }
-
-                    $commands = [
-                        'Database migrated' => trim(sprintf(
-                            $this->phpBinary().' laragram migrate %s',
-                            ! $input->isInteractive() ? '--no-interaction' : '',
-                        )),
-                    ];
-
-                    $this->runCommands(
-                        $commands,
-                        $input,
-                        $output,
-                        workingPath: $directory,
-                        taskLabel: 'Running database migrations',
-                    );
-                }
-            }
-
-            if ($input->getOption('git') || $input->getOption('github') !== false) {
-                $this->createRepository($directory, $input, $output);
-            }
-
-            if ($input->getOption('github') !== false) {
-                $this->pushToGitHub($name, $directory, $input, $output);
-                $output->writeln('');
-            }
-
-            // Set up frontend and packages
-            [$packageManager, $runPackageManager] = match (true) {
-                $input->getOption('no-node') => [NodePackageManager::NPM, false],
-                default => $this->installNodeDependencies($directory, $input, $output),
-            };
-
-            // Set credentials & run initialization scripts
-            $this->configureTelegramCredentials($directory, $input, $output);
-
-            // Print final instructions
-            $getStartedSteps = ["cd {$name}"];
-
-            if ($input->getOption('mtproto')) {
-                $getStartedSteps[] = 'php laragram client:start';
-            } else {
-                if (! $runPackageManager && ! $input->getOption('no-node') && $this->usingStarterKit($input)) {
-                    $getStartedSteps[] = $packageManager->installCommand().' && '.$packageManager->buildCommand();
-                }
-                $getStartedSteps[] = 'php laragram serve';
-            }
-
-            if (function_exists('LaraGram\Console\Prompts\callout')) {
-                callout(
-                    label: 'Application ready',
-                    content: [
-                        'You can start your local development using:',
-                        Element::numberedList($getStartedSteps),
-                        $output->getFormatter()->format('<options=bold>New to LaraGram?</>')
-                        .' Check out our '.Element::link(
-                            'https://laraxgram.github.io/installation#next-steps',
-                            'documentation'
-                        ).'.',
-                        Element::heading('Build something amazing!'),
-                    ],
-                );
-            } else {
-                $output->writeln('');
-                $output->writeln(' <fg=cyan;options=bold>New to LaraGram?</> Check out our <href=https://laraxgram.github.io/installation#next-steps;options=underscore>documentation</>. <options=bold>Build something amazing!</>');
-                $output->writeln('');
-            }
+            return $process->getExitCode();
         }
 
-        return $process->getExitCode();
+        $hooksProcess = $this->runInstallerHooks($directory, $input, $output);
+
+        if ($hooksProcess && ! $hooksProcess->isSuccessful()) {
+            return $hooksProcess->getExitCode();
+        }
+
+        if (($process = $this->installPackages($directory, $input, $output)) && ! $process->isSuccessful()) {
+            return $process->getExitCode();
+        }
+
+        $this->configureEnvironment($directory, $name, $input);
+
+        $this->configurePackages($directory, $input, $output);
+
+        if ($this->migrate) {
+            $this->migrateDatabase($directory, $input, $output);
+        }
+
+        [$packageManager, $runPackageManager] = match (true) {
+            $this->shouldInstallNodeDependencies($input) => $this->installNodeDependencies($directory, $input, $output),
+            default => [NodePackageManager::NPM, false],
+        };
+
+        if ($input->getOption('webhook')) {
+            $this->setWebhook($directory, $input, $output);
+        }
+
+        if ($input->getOption('brain') && ! $input->getOption('no-brain')) {
+            $this->installBrain($directory, $input, $output);
+        }
+
+        if ($input->getOption('git') || $input->getOption('github') !== false) {
+            $this->createRepository($directory, $input, $output);
+        }
+
+        if ($input->getOption('github') !== false) {
+            $this->pushToGitHub($name, $directory, $input, $output);
+            $output->writeln('');
+        }
+
+        $this->displayNextSteps($name, $packageManager, $runPackageManager, $input, $output);
+
+        return self::SUCCESS;
     }
 
     /**
-     * Gather API, Token, Client, or Userbot parameters and run configuration scripts.
-     */
-    protected function configureTelegramCredentials(string $directory, InputInterface $input, OutputInterface $output)
-    {
-        if ($input->getOption('mtproto')) {
-            // Get credentials for MTProto Setup
-            $apiId = password(
-                label: 'Enter your Telegram API ID: ',
-                hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
-            );
-
-            $apiHash = password(
-                label: 'Enter your Telegram API HASH: ',
-                hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
-            );
-
-            if ($apiId !== '') {
-                $this->pregReplaceInFile('/^API_ID=.*/m', "API_ID=\"{$apiId}\"", $directory.'/.env');
-            }
-
-            if ($apiHash !== '') {
-                $this->pregReplaceInFile('/^API_HASH=.*/m', "API_HASH=\"{$apiHash}\"", $directory.'/.env');
-            }
-
-            $this->runCommands([
-                $this->phpBinary(). ' vendor/bin/compile-tl.php',
-                $this->phpBinary(). ' laragram install:client',
-                $this->phpBinary() . ' laragram vendor:publish --tag=mtproto-config'
-            ], $input, $output, workingPath: $directory, taskLabel: "Initialize MTProto");
-        } else {
-            // Get credentials for standard Bot token and webhook
-            $token = password(
-                label: 'Enter your Bot Token: ',
-                hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
-            );
-
-            $url = text(
-                label: 'Enter your Bot URL: ',
-                hint: 'Press <fg=yellow>Enter</> <fg=gray>to Skip...</>'
-            );
-
-            if ($token !== '') {
-                $this->pregReplaceInFile('/^BOT_TOKEN=.*/m', "BOT_TOKEN=\"{$token}\"", $directory.'/.env');
-            }
-
-            if ($url !== '') {
-                $this->pregReplaceInFile('/^BOT_URL=.*/m', "BOT_URL=\"{$url}\"", $directory.'/.env');
-            }
-
-            if ($token !== '' && $url !== '') {
-                if (confirm(label: "Do you want to set webhook?")) {
-                    // Running webhook set directly to ensure reliable interactive inputs
-                    $this->runCommands([
-                        $this->phpBinary() . " laragram webhook:set"
-                    ], $input, $output, workingPath: $directory);
-                }
-            }
-        }
-    }
-
-    /**
-     * Determine the correct NPM package manager to run.
+     * Validate the given options, since they may not have been gathered interactively.
      *
-     * @return array{NodePackageManager, bool}
+     * @throws \InvalidArgumentException
+     * @throws \RuntimeException
      */
-    protected function determinePackageManager(string $directory, InputInterface $input): array
+    protected function validateOptions(InputInterface $input): void
     {
-        if ($input->getOption('pnpm')) {
-            return [NodePackageManager::PNPM, true];
+        if ($input->getOption('database') && ! in_array($input->getOption('database'), self::DATABASE_DRIVERS)) {
+            throw new \InvalidArgumentException("Invalid database driver [{$input->getOption('database')}]. Possible values are: ".implode(', ', self::DATABASE_DRIVERS).'.');
         }
 
-        if ($input->getOption('bun')) {
-            return [NodePackageManager::BUN, true];
-        }
+        if ($input->getOption('surge') !== false) {
+            $input->setOption('surge', $input->getOption('surge') ?: 'swoole');
 
-        if ($input->getOption('yarn')) {
-            return [NodePackageManager::YARN, true];
-        }
-
-        if ($input->getOption('npm')) {
-            return [NodePackageManager::NPM, true];
-        }
-
-        foreach (NodePackageManager::cases() as $packageManager) {
-            if ($packageManager === NodePackageManager::NPM) {
-                continue;
+            if (! in_array($input->getOption('surge'), self::SURGE_SERVERS)) {
+                throw new \InvalidArgumentException("Invalid Surge server [{$input->getOption('surge')}]. Possible values are: ".implode(', ', self::SURGE_SERVERS).'.');
             }
 
-            foreach ($packageManager->lockFiles() as $lockFile) {
-                if (file_exists($directory.'/'.$lockFile)) {
-                    return [$packageManager, false];
-                }
+            if ($input->getOption('surge') === 'swoole' && ! $this->swooleIsAvailable()) {
+                throw new RuntimeException('The Swoole server for LaraGram Surge requires the Swoole or OpenSwoole extension.');
             }
         }
 
-        return [NodePackageManager::NPM, false];
+        if ($input->getOption('mtproto') && ($message = $this->missingExtensionsMessage('MTProto', self::MTPROTO_EXTENSIONS))) {
+            throw new RuntimeException($message);
+        }
+
+        if (($url = $input->getOption('bot-url')) && ! $this->isValidWebhookUrl($url)) {
+            throw new \InvalidArgumentException("Invalid bot URL [{$url}]. The URL must be a valid HTTPS URL.");
+        }
+
+        if ($input->getOption('webhook') && (! $input->getOption('token') || ! $input->getOption('bot-url'))) {
+            throw new \InvalidArgumentException('The --webhook option requires both --token and --bot-url.');
+        }
+
+        // Interactive installs already verified the token while it was entered...
+        if (($token = $input->getOption('token')) && $this->bot === null && ($error = $this->verifyBotToken($token))) {
+            throw new \InvalidArgumentException($error);
+        }
     }
 
     /**
-     * Get the default local branch configuration.
+     * Install the selected LaraGram packages.
+     *
+     * The Telegram API types are generated by the application's Composer scripts,
+     * so they run through Composer: post-update-cmd when packages are required,
+     * otherwise post-install-cmd, which create-project skipped.
+     */
+    protected function installPackages(string $directory, InputInterface $input, OutputInterface $output): ?Process
+    {
+        $composer = $this->findComposer();
+
+        $packages = array_keys(array_filter([
+            'laraxgram/surge' => $input->getOption('surge') !== false,
+            'laraxgram/mtproto' => $input->getOption('mtproto'),
+        ]));
+
+        $devPackages = array_keys(array_filter([
+            'laraxgram/brain' => $input->getOption('brain') && ! $input->getOption('no-brain'),
+        ]));
+
+        if ($packages === [] && $devPackages === []) {
+            // Starter kits already ran their Composer scripts during create-project...
+            if ($this->usingStarterKit($input) || ! $this->hasComposerScript($directory, 'post-install-cmd')) {
+                return null;
+            }
+
+            return $this->runCommands(
+                ['Telegram API generated' => $composer.' run-script post-install-cmd'],
+                $input,
+                $output,
+                workingPath: $directory,
+                taskLabel: 'Generating Telegram API',
+            );
+        }
+
+        $commands = [];
+
+        if ($packages !== []) {
+            $commands[] = $composer.' require '.implode(' ', $packages).' --no-update';
+        }
+
+        if ($devPackages !== []) {
+            $commands[] = $composer.' require '.implode(' ', $devPackages).' --dev --no-update';
+        }
+
+        $commands[] = $composer.' update';
+
+        return $this->runCommands(
+            ['Packages installed' => $commands],
+            $input,
+            $output,
+            workingPath: $directory,
+            taskLabel: 'Installing LaraGram packages',
+        );
+    }
+
+    /**
+     * Determine if the application defines the given Composer script.
+     */
+    protected function hasComposerScript(string $directory, string $script): bool
+    {
+        $composer = json_decode(file_get_contents($directory.'/composer.json'), true) ?: [];
+
+        return ! empty($composer['scripts'][$script]);
+    }
+
+    /**
+     * Run the installation commands of the selected packages.
+     */
+    protected function configurePackages(string $directory, InputInterface $input, OutputInterface $output): void
+    {
+        if ($input->getOption('surge') !== false) {
+            $this->runCommands(
+                ['Surge installed' => $this->phpBinary().' laragram surge:install --server='.$input->getOption('surge').' --no-interaction'],
+                $input,
+                $output,
+                workingPath: $directory,
+                taskLabel: 'Installing LaraGram Surge',
+            );
+        }
+
+        if ($input->getOption('mtproto')) {
+            $this->runCommands(
+                ['MTProto installed' => [
+                    $this->phpBinary().' laragram install:client',
+                    $this->phpBinary().' laragram vendor:publish --tag=mtproto-config',
+                ]],
+                $input,
+                $output,
+                workingPath: $directory,
+                taskLabel: 'Installing MTProto',
+            );
+        }
+    }
+
+    /**
+     * Write the gathered configuration to the application's environment files.
+     */
+    protected function configureEnvironment(string $directory, string $name, InputInterface $input): void
+    {
+        $this->pregReplaceInFile(
+            '/^APP_URL=http:\/\/localhost$/m',
+            'APP_URL=http://localhost:9000',
+            $directory.'/.env'
+        );
+
+        $this->setEnvironmentValues($directory.'/.env', array_filter([
+            'BOT_TOKEN' => $input->getOption('token'),
+            'BOT_URL' => $input->getOption('bot-url'),
+            'BOT_USERNAME' => $this->bot['username'] ?? null,
+            'BOT_USERID' => $this->bot['id'] ?? null,
+            'API_ID' => $input->getOption('api-id'),
+            'API_HASH' => $input->getOption('api-hash'),
+        ], fn ($value) => $value !== null && $value !== ''));
+
+        $this->configureDefaultDatabaseConnection(
+            $directory,
+            $input->getOption('database') ?: 'sqlite',
+            $name === '.' ? basename(getcwd()) : basename($name),
+        );
+    }
+
+    /**
+     * Set the given values in the given environment file, appending missing keys.
+     */
+    protected function setEnvironmentValues(string $file, array $values): void
+    {
+        $contents = file_get_contents($file);
+
+        foreach ($values as $key => $value) {
+            $line = $key.'='.(preg_match('/[\s#"\'$\\\\]/', (string) $value) ? '"'.addcslashes($value, '"\\$').'"' : $value);
+
+            $contents = preg_match("/^{$key}=.*$/m", $contents)
+                ? preg_replace_callback("/^{$key}=.*$/m", fn () => $line, $contents)
+                : rtrim($contents).PHP_EOL.$line.PHP_EOL;
+        }
+
+        file_put_contents($file, $contents);
+    }
+
+    /**
+     * Return the local machine's default Git branch if set or default to `main`.
      *
      * @return string
      */
     protected function defaultBranch()
     {
         $process = new Process(['git', 'config', '--global', 'init.defaultBranch']);
+
         $process->run();
+
         $output = trim($process->getOutput());
 
         return $process->isSuccessful() && $output ? $output : 'main';
     }
 
     /**
-     * Configure default database parameters.
+     * Configure the default database connection.
      *
      * @return void
      */
@@ -751,13 +920,15 @@ class NewCommand extends Command
         if ($database === 'sqlite') {
             $environment = file_get_contents($directory.'/.env');
 
+            // If database options aren't commented, comment them for SQLite...
             if (! str_contains($environment, '# DB_HOST=127.0.0.1')) {
                 $this->commentDatabaseConfigurationForSqlite($directory);
-                return;
             }
+
             return;
         }
 
+        // Any commented database configuration options should be uncommented when not on SQLite...
         $this->uncommentDatabaseConfiguration($directory);
 
         $defaultPorts = [
@@ -781,19 +952,19 @@ class NewCommand extends Command
 
         $this->replaceInFile(
             'DB_DATABASE=laragram',
-            'DB_DATABASE='.str_replace('-', '_', strtolower($name)),
+            'DB_DATABASE='.str_replace(['-', '.'], '_', strtolower($name)),
             $directory.'/.env'
         );
 
         $this->replaceInFile(
             'DB_DATABASE=laragram',
-            'DB_DATABASE='.str_replace('-', '_', strtolower($name)),
+            'DB_DATABASE='.str_replace(['-', '.'], '_', strtolower($name)),
             $directory.'/.env.example'
         );
     }
 
     /**
-     * Comment out extra database variables for SQLite builds.
+     * Comment the irrelevant database configuration entries for SQLite applications.
      */
     protected function commentDatabaseConfigurationForSqlite(string $directory): void
     {
@@ -819,7 +990,9 @@ class NewCommand extends Command
     }
 
     /**
-     * Uncomment database variables for non-SQLite installations.
+     * Uncomment the relevant database configuration entries for non SQLite applications.
+     *
+     * @return void
      */
     protected function uncommentDatabaseConfiguration(string $directory)
     {
@@ -845,77 +1018,131 @@ class NewCommand extends Command
     }
 
     /**
-     * Choose and configure the fallback or specified database driver.
+     * Run the default database migrations.
      */
-    protected function promptForDatabaseOptions(string $directory, InputInterface $input)
+    protected function migrateDatabase(string $directory, InputInterface $input, OutputInterface $output): void
     {
-        $databaseOptions = $this->databaseOptions();
-        $defaultDatabase = collect($databaseOptions)->keys()->first();
-
-        if (! $input->getOption('database') && $this->usingStarterKit($input)) {
-            $migrate = false;
-            $input->setOption('database', 'sqlite');
+        if (($input->getOption('database') ?: 'sqlite') === 'sqlite') {
+            touch($directory.'/database/database.sqlite');
         }
 
-        if (! $input->getOption('database') && $input->isInteractive()) {
-            $input->setOption('database', select(
-                label: 'Which database will your application use?',
-                options: $databaseOptions,
-                default: $defaultDatabase,
-            ));
-
-            if ($input->getOption('database') !== 'sqlite') {
-                $migrate = confirm(
-                    label: 'Default database updated. Would you like to run the default database migrations?'
-                );
-            } else {
-                $migrate = true;
-            }
-        }
-
-        return [$input->getOption('database') ?? $defaultDatabase, $migrate ?? $input->hasOption('database')];
+        $this->runCommands(
+            ['Database migrated' => $this->phpBinary().' laragram migrate --graceful --no-interaction'],
+            $input,
+            $output,
+            workingPath: $directory,
+            taskLabel: 'Running database migrations',
+        );
     }
 
     /**
-     * Get a list of supported database engines.
+     * Get the available database options.
      */
     protected function databaseOptions(): array
     {
         return collect([
-            'sqlite' => ['SQLite', extension_loaded('pdo_sqlite')],
-            'mysql' => ['MySQL', extension_loaded('pdo_mysql')],
-            'mariadb' => ['MariaDB', extension_loaded('pdo_mysql')],
-            'pgsql' => ['PostgreSQL', extension_loaded('pdo_pgsql')],
-            'sqlsrv' => ['SQL Server', extension_loaded('pdo_sqlsrv')],
+            'sqlite' => 'SQLite',
+            'mysql' => 'MySQL',
+            'mariadb' => 'MariaDB',
+            'pgsql' => 'PostgreSQL',
+            'sqlsrv' => 'SQL Server',
         ])
-            ->sortBy(fn ($database) => $database[1] ? 0 : 1)
-            ->map(fn ($database) => $database[0].($database[1] ? '' : ' (Missing PDO extension)'))
+            ->sortBy(fn ($label, $driver) => extension_loaded($this->pdoExtension($driver)) ? 0 : 1)
+            ->map(fn ($label, $driver) => $label.(extension_loaded($this->pdoExtension($driver)) ? '' : ' (Missing PDO extension)'))
             ->all();
     }
 
     /**
-     * Validate the chosen database option.
+     * Get the PDO extension of the given database driver.
      */
-    protected function validateDatabaseOption(InputInterface $input)
+    protected function pdoExtension(string $driver): string
     {
-        if ($input->getOption('database') && ! in_array($input->getOption('database'), self::DATABASE_DRIVERS)) {
-            throw new \InvalidArgumentException("Invalid database driver [{$input->getOption('database')}]. Possible values are: ".implode(', ', self::DATABASE_DRIVERS).'.');
-        }
+        return $driver === 'mariadb' ? 'pdo_mysql' : 'pdo_'.$driver;
     }
 
     /**
-     * Install required node assets.
+     * Determine if the Swoole or OpenSwoole extension is available.
+     */
+    protected function swooleIsAvailable(): bool
+    {
+        return extension_loaded('swoole') || extension_loaded('openswoole');
+    }
+
+    /**
+     * Determine if Node dependencies should be installed.
+     *
+     * Only Mini App starter kits need a frontend build. Plain bots install them on
+     * demand, unless a package manager was explicitly requested.
+     */
+    protected function shouldInstallNodeDependencies(InputInterface $input): bool
+    {
+        if ($input->getOption('no-node')) {
+            return false;
+        }
+
+        return $this->usingStarterKit($input)
+            || $input->getOption('npm')
+            || $input->getOption('pnpm')
+            || $input->getOption('bun')
+            || $input->getOption('yarn');
+    }
+
+    /**
+     * Determine the Node package manager to use.
+     *
+     * @return array{NodePackageManager, bool}
+     */
+    protected function determinePackageManager(string $directory, InputInterface $input): array
+    {
+        // If they passed a specific flag, respect the user's choice...
+        if ($input->getOption('pnpm')) {
+            return [NodePackageManager::PNPM, true];
+        }
+
+        if ($input->getOption('bun')) {
+            return [NodePackageManager::BUN, true];
+        }
+
+        if ($input->getOption('yarn')) {
+            return [NodePackageManager::YARN, true];
+        }
+
+        if ($input->getOption('npm')) {
+            return [NodePackageManager::NPM, true];
+        }
+
+        // Check for an existing lock file to determine the package manager...
+        foreach (NodePackageManager::cases() as $packageManager) {
+            if ($packageManager === NodePackageManager::NPM) {
+                continue;
+            }
+
+            foreach ($packageManager->lockFiles() as $lockFile) {
+                if (file_exists($directory.'/'.$lockFile)) {
+                    return [$packageManager, true];
+                }
+            }
+        }
+
+        return [NodePackageManager::NPM, true];
+    }
+
+    /**
+     * Install Node dependencies and build assets.
+     *
+     * @return array{NodePackageManager, bool} The package manager used and whether it was run
      */
     protected function installNodeDependencies(string $directory, InputInterface $input, OutputInterface $output): array
     {
         [$packageManager, $runPackageManager] = $this->determinePackageManager($directory, $input);
-        $this->configureComposerScripts($packageManager);
 
-        if (! $runPackageManager && $input->isInteractive()) {
-            $runPackageManager = confirm(
-                label: 'Would you like to run <options=bold>'.$packageManager->installCommand().'</> and <options=bold>'.$packageManager->buildCommand().'</>?'
-            );
+        if ((new ExecutableFinder)->find($packageManager->value) === null) {
+            $output->writeln("  <bg=yellow;fg=black> WARN </> The [{$packageManager->value}] executable could not be found. Skipping frontend dependencies...".PHP_EOL);
+
+            $runPackageManager = false;
         }
+
+        $this->configureComposerScripts($packageManager);
 
         foreach (NodePackageManager::allLockFiles() as $lockFile) {
             if (! in_array($lockFile, $packageManager->lockFiles()) && file_exists($directory.'/'.$lockFile)) {
@@ -924,7 +1151,7 @@ class NewCommand extends Command
         }
 
         if ($runPackageManager) {
-            $this->runCommands(
+            $runPackageManager = $this->runCommands(
                 [
                     'Packages installed' => $packageManager->installCommand(),
                     'Assets built' => $packageManager->buildCommand(),
@@ -933,14 +1160,49 @@ class NewCommand extends Command
                 $output,
                 workingPath: $directory,
                 taskLabel: 'Setting up frontend dependencies with '.$packageManager->value,
-            );
+            )->isSuccessful();
         }
 
         return [$packageManager, $runPackageManager];
     }
 
     /**
-     * Initialize Git repository and make initial commit.
+     * Set the bot webhook to the configured bot URL.
+     */
+    protected function setWebhook(string $directory, InputInterface $input, OutputInterface $output): void
+    {
+        $this->runCommands(
+            ['Webhook set' => $this->phpBinary().' laragram webhook:set'],
+            $input,
+            $output,
+            workingPath: $directory,
+            taskLabel: 'Setting the bot webhook',
+        );
+    }
+
+    /**
+     * Install LaraGram Brain into the application.
+     *
+     * The package itself is installed with the other packages. Its installer
+     * asks which agents to configure, so it runs attached to the terminal.
+     */
+    protected function installBrain(string $directory, InputInterface $input, OutputInterface $output): void
+    {
+        $this->runCommands(
+            [trim(sprintf(
+                $this->phpBinary().' laragram brain:install %s',
+                ! $input->isInteractive() ? '--no-interaction' : '',
+            ))],
+            $input,
+            $output,
+            workingPath: $directory,
+        );
+    }
+
+    /**
+     * Create a Git repository and commit the fresh LaraGram application.
+     *
+     * @return void
      */
     protected function createRepository(string $directory, InputInterface $input, OutputInterface $output)
     {
@@ -965,32 +1227,9 @@ class NewCommand extends Command
     }
 
     /**
-     * Add post-install commits to git.
-     */
-    protected function commitChanges(string $message, string $directory, InputInterface $input, OutputInterface $output)
-    {
-        if (! $input->getOption('git') && $input->getOption('github') === false) {
-            return;
-        }
-
-        $commands = [
-            'Changes committed' => [
-                'git add .',
-                "git commit -q -m \"$message\"",
-            ],
-        ];
-
-        $this->runCommands(
-            $commands,
-            $input,
-            $output,
-            workingPath: $directory,
-            taskLabel: 'Committing changes',
-        );
-    }
-
-    /**
-     * Create and push your code to GitHub repository.
+     * Create a GitHub repository and push the git log to it.
+     *
+     * @return void
      */
     protected function pushToGitHub(string $name, string $directory, InputInterface $input, OutputInterface $output)
     {
@@ -999,11 +1238,19 @@ class NewCommand extends Command
 
         if (! $process->isSuccessful()) {
             $output->writeln('  <bg=yellow;fg=black> WARN </> Make sure the "gh" CLI tool is installed and that you\'re authenticated to GitHub. Skipping...'.PHP_EOL);
+
             return;
         }
 
-        $name = $input->getOption('organization') ? $input->getOption('organization')."/$name" : $name;
-        $flags = $input->getOption('github') ?: '--private';
+        $github = trim((string) $input->getOption('github'));
+        $githubIsOwner = $github !== '' && ! str_starts_with($github, '-');
+
+        $owner = $input->getOption('organization') ?: ($githubIsOwner ? $github : null);
+        $flags = ($githubIsOwner || $github === '') ? '--private' : $github;
+
+        if ($owner) {
+            $name = "{$owner}/{$name}";
+        }
 
         $commands = [
             'Repository pushed' => "gh repo create {$name} --source=. --push {$flags}",
@@ -1020,18 +1267,61 @@ class NewCommand extends Command
     }
 
     /**
-     * Change standard compose run configs based on your Node package manager choice.
+     * Display the steps needed to start the new application.
+     */
+    protected function displayNextSteps(string $name, NodePackageManager $packageManager, bool $runPackageManager, InputInterface $input, OutputInterface $output): void
+    {
+        $getStartedSteps = ["cd {$name}"];
+
+        $missingEnvironmentValues = array_keys(array_filter([
+            'BOT_TOKEN' => ! $input->getOption('token'),
+            'BOT_URL' => ! $input->getOption('bot-url'),
+        ]));
+
+        if ($missingEnvironmentValues !== []) {
+            $getStartedSteps[] = 'Set '.implode(' and ', $missingEnvironmentValues).' in the .env file';
+        }
+
+        if ($this->usingStarterKit($input) && ! $runPackageManager) {
+            $getStartedSteps[] = $packageManager->installCommand().' && '.$packageManager->buildCommand();
+        }
+
+        if ($input->getOption('mtproto')) {
+            $getStartedSteps[] = 'php laragram client:auth';
+            $getStartedSteps[] = 'php laragram client:start';
+        }
+
+        $getStartedSteps[] = match (true) {
+            $input->getOption('surge') !== false => 'php laragram surge:start',
+            $runPackageManager => 'composer run dev',
+            default => 'php laragram serve',
+        };
+
+        if (! $input->getOption('webhook')) {
+            $getStartedSteps[] = 'php laragram webhook:set';
+        }
+
+        callout(
+            label: 'Application ready',
+            content: [
+                'You can start your local development using:',
+                Element::numberedList($getStartedSteps),
+                $output->getFormatter()->format('<options=bold>New to LaraGram?</>')
+                    .' Check out our '.Element::link(
+                        'https://laraxgram.github.io/v4/installation.html#next-steps',
+                        'documentation'
+                    ).'.',
+                Element::heading('Build something amazing!'),
+            ],
+        );
+    }
+
+    /**
+     * Configure the Composer scripts for the selected package manager.
      */
     protected function configureComposerScripts(NodePackageManager $packageManager): void
     {
         $this->composer->modify(function (array $content) use ($packageManager) {
-            if (windows_os()) {
-                $content['scripts']['dev'] = [
-                    'Composer\\Config::disableProcessTimeout',
-                    "npx concurrently -c \"#93c5fd,#c4b5fd,#fdba74\" \"php laragram serve\" \"php laragram queue:listen --tries=1\" \"npm run dev\" --names='server,queue,vite'",
-                ];
-            }
-
             foreach (['dev', 'dev:ssr', 'setup'] as $scriptKey) {
                 if (array_key_exists($scriptKey, $content['scripts'])) {
                     $content['scripts'][$scriptKey] = str_replace(
@@ -1047,7 +1337,7 @@ class NewCommand extends Command
     }
 
     /**
-     * Run scripts configured within composer.json scripts blocks.
+     * Run any LaraGram installer hooks defined by the installed application.
      */
     protected function runInstallerHooks(string $directory, InputInterface $input, OutputInterface $output): ?Process
     {
@@ -1062,12 +1352,13 @@ class NewCommand extends Command
             $input,
             $output,
             workingPath: $directory,
+            env: $input->getOption('no-node') ? ['LARAGRAM_INSTALLER_NO_NODE' => '1'] : [],
             taskLabel: 'Running starter kit hooks',
         );
     }
 
     /**
-     * Resolve hooks within custom starter kit dependencies.
+     * Get the commands for the given LaraGram installer hook.
      */
     protected function installerHooks(string $directory, string $hook): array
     {
@@ -1087,7 +1378,7 @@ class NewCommand extends Command
     }
 
     /**
-     * Helper mapping aliases (like @php) to explicit values.
+     * Normalize Composer-style script commands for direct execution by the installer.
      */
     protected function normalizeInstallerHookCommand(string $command): string
     {
@@ -1112,7 +1403,10 @@ class NewCommand extends Command
     }
 
     /**
-     * Verify that no files are occupying target project path.
+     * Verify that the application does not already exist.
+     *
+     * @param  string  $directory
+     * @return void
      */
     protected function verifyApplicationDoesntExist($directory)
     {
@@ -1122,7 +1416,7 @@ class NewCommand extends Command
     }
 
     /**
-     * Match user option to starter kit repository path.
+     * Get the starter kit repository, if any.
      */
     protected function getStarterKit(InputInterface $input): ?string
     {
@@ -1135,7 +1429,7 @@ class NewCommand extends Command
     }
 
     /**
-     * Check if chosen starter kit is published under LaraGram organization namespace.
+     * Determine if a LaraGram first-party starter kit has been chosen.
      */
     protected function usingLaraGramStarterKit(InputInterface $input): bool
     {
@@ -1144,7 +1438,9 @@ class NewCommand extends Command
     }
 
     /**
-     * Determine if a starter kit package of any type is requested.
+     * Determine if a starter kit is being used.
+     *
+     * @return bool
      */
     protected function usingStarterKit(InputInterface $input)
     {
@@ -1152,15 +1448,9 @@ class NewCommand extends Command
     }
 
     /**
-     * Determine if local resolution is configured for a hostname.
-     */
-    protected function canResolveHostname($hostname)
-    {
-        return gethostbyname($hostname.'.') !== $hostname.'.';
-    }
-
-    /**
-     * Retrieve targeted installation subdirectory structure.
+     * Get the installation directory.
+     *
+     * @return string
      */
     protected function getInstallationDirectory(string $name)
     {
@@ -1172,19 +1462,23 @@ class NewCommand extends Command
     }
 
     /**
-     * Retrieve target LaraGram core distribution branch.
+     * Get the version that should be downloaded.
+     *
+     * @return string
      */
     protected function getVersion(InputInterface $input)
     {
         if ($input->getOption('dev')) {
-            return 'dev-master';
+            return '4.x-dev';
         }
 
         return '';
     }
 
     /**
-     * Locate composer configuration binary path.
+     * Get the composer command for the environment.
+     *
+     * @return string
      */
     protected function findComposer()
     {
@@ -1192,7 +1486,9 @@ class NewCommand extends Command
     }
 
     /**
-     * Locate current dynamic PHP interpreter binary.
+     * Get the path to the appropriate PHP binary.
+     *
+     * @return string
      */
     protected function phpBinary()
     {
@@ -1206,7 +1502,10 @@ class NewCommand extends Command
     }
 
     /**
-     * Execute array of subcommands sequentially in terminal shell.
+     * Run the given commands.
+     *
+     * @param  array  $commands
+     * @return \LaraGram\Console\Process\Process
      */
     protected function runCommands(
         $commands,
@@ -1221,9 +1520,10 @@ class NewCommand extends Command
         if (! $output->isDecorated()) {
             $commands = array_map(
                 fn ($values) => array_map(function ($value) {
-                    if (Str::startsWith($value, ['chmod', 'rm', 'git'])) {
+                    if (Str::startsWith($value, ['chmod', 'rm', 'git', 'npm', 'pnpm', 'yarn', 'bun'])) {
                         return $value;
                     }
+
                     return $value.' --no-ansi';
                 }, $values),
                 $commands,
@@ -1233,9 +1533,10 @@ class NewCommand extends Command
         if ($input->getOption('quiet')) {
             $commands = array_map(
                 fn ($values) => array_map(function ($value) {
-                    if (Str::startsWith($value, ['chmod', 'rm', 'git'])) {
+                    if (Str::startsWith($value, ['chmod', 'rm', 'git', 'npm', 'pnpm', 'yarn', 'bun'])) {
                         return $value;
                     }
+
                     return $value.' --quiet';
                 }, $values),
                 $commands,
@@ -1254,7 +1555,7 @@ class NewCommand extends Command
 
         $process = Process::fromShellCommandline($commandline, $workingPath, $env, null, null);
 
-        if (Process::isTtySupported() && $input->isInteractive()) {
+        if (Process::isTtySupported() && $input->isInteractive() && ! $this->agent->isActive()) {
             try {
                 $process->setTty(true);
             } catch (RuntimeException $e) {
@@ -1270,18 +1571,21 @@ class NewCommand extends Command
     }
 
     /**
-     * Determine if CLI commands should render as a unified progress block task.
+     * Determine if the commands should be run as tasks.
      */
     protected function shouldRunAsTask(OutputInterface $output, array $commands): bool
     {
         return function_exists('LaraGram\Console\Prompts\task')
             && function_exists('pcntl_fork')
             && ! array_is_list($commands)
+            && ! $this->agent->isActive()
             && $this->useConciseOutput($output);
     }
 
     /**
-     * Proxy array of commands through the LaraGram console tasks module.
+     * Run the given shell commands within a LaraGram Prompts task.
+     *
+     * @param  non-empty-array<string, non-empty-array<int, string>>  $commands
      */
     protected function runCommandsAsTask(
         array $commands,
@@ -1293,6 +1597,8 @@ class NewCommand extends Command
             label: $taskLabel ? str($taskLabel)->finish('...') : '',
             keepSummary: true,
             callback: function (Logger $logger) use ($commands, $workingPath, $env, $taskLabel) {
+                $process = null;
+
                 foreach ($commands as $label => $subCommands) {
                     foreach ($subCommands as $command) {
                         $logger->subLabel($command);
@@ -1324,7 +1630,7 @@ class NewCommand extends Command
     }
 
     /**
-     * Proxy shell command processes on Windows with local STDIN descriptors.
+     * Run the given command on Windows with inherited stdio for interactive support.
      */
     protected function runCommandsInteractivelyOnWindows(string $commandline, ?string $workingPath, array $env): Process
     {
@@ -1335,6 +1641,7 @@ class NewCommand extends Command
         ];
 
         $envPairs = $env !== [] ? array_filter(array_merge($_SERVER, $_ENV, $env), fn ($v) => ! is_array($v)) : null;
+
         $proc = proc_open($commandline, $descriptors, $pipes, $workingPath, $envPairs);
 
         if (is_resource($proc)) {
@@ -1343,27 +1650,18 @@ class NewCommand extends Command
             $exitCode = 1;
         }
 
+        // Return a completed Process instance that reflects the actual exit code...
         $sentinel = Process::fromShellCommandline('exit '.$exitCode, $workingPath);
+
         $sentinel->run();
 
         return $sentinel;
     }
 
     /**
-     * Replace content block using relative stub resources.
-     */
-    protected function replaceFile(string $replace, string $file)
-    {
-        $stubs = dirname(__DIR__).'/stubs';
-
-        file_put_contents(
-            $file,
-            $stubs . "/" . $replace,
-        );
-    }
-
-    /**
-     * Swap simple search key with replacements inside a text file.
+     * Replace the given string in the given file.
+     *
+     * @return void
      */
     protected function replaceInFile(string|array $search, string|array $replace, string $file)
     {
@@ -1374,7 +1672,9 @@ class NewCommand extends Command
     }
 
     /**
-     * Swap regex patterns with customized string formats inside a text file.
+     * Replace the given string in the given file using regular expressions.
+     *
+     * @return void
      */
     protected function pregReplaceInFile(string $pattern, string $replace, string $file)
     {
@@ -1385,26 +1685,10 @@ class NewCommand extends Command
     }
 
     /**
-     * Delete filesystem item from workspace.
-     */
-    protected function deleteFile(string $file)
-    {
-        unlink($file);
-    }
-
-    /**
-     * Determine output dynamic verbosity context.
+     * Determine if concise output should be used.
      */
     protected function useConciseOutput(OutputInterface $output): bool
     {
         return $output->getVerbosity() === OutputInterface::VERBOSITY_NORMAL || $output->isQuiet();
-    }
-
-    /**
-     * Determine if LaraGram Surge integration flag was passed.
-     */
-    protected function usingSurge(InputInterface $input)
-    {
-        return $input->getOption('surge');
     }
 }
