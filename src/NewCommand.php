@@ -25,6 +25,7 @@ use function LaraGram\Console\Prompts\callout;
 use function LaraGram\Console\Prompts\confirm;
 use function LaraGram\Console\Prompts\form;
 use function LaraGram\Console\Prompts\password;
+use function LaraGram\Console\Prompts\select;
 use function LaraGram\Console\Prompts\task;
 use function LaraGram\Console\Prompts\text;
 use function LaraGram\Filesystem\join_paths;
@@ -37,6 +38,10 @@ class NewCommand extends Command
     const DATABASE_DRIVERS = ['mysql', 'mariadb', 'pgsql', 'sqlite', 'sqlsrv'];
 
     const SURGE_SERVERS = ['swoole', 'roadrunner', 'frankenphp'];
+
+    const API_SERVERS = ['official', 'laragram'];
+
+    const LOCAL_API_SERVER_ENDPOINT = 'http://127.0.0.1:8081';
 
     const MTPROTO_EXTENSIONS = ['gmp', 'json', 'mbstring', 'openssl', 'sockets', 'zlib'];
 
@@ -56,6 +61,11 @@ class NewCommand extends Command
      * Whether the default database migrations should be run.
      */
     protected bool $migrate = true;
+
+    /**
+     * Whether the Bot API connection should be configured.
+     */
+    protected bool $configureBot = true;
 
     /**
      * Detect agents, suppress interactive output, and emit a JSON result.
@@ -108,11 +118,15 @@ class NewCommand extends Command
             ->addOption('github', null, InputOption::VALUE_OPTIONAL, 'Create a new repository on GitHub, optionally for the given owner or with the given "gh repo create" flags', false)
             ->addOption('organization', null, InputOption::VALUE_REQUIRED, 'The GitHub organization to create the new repository for')
             ->addOption('token', null, InputOption::VALUE_REQUIRED, 'The Telegram bot token from @BotFather')
-            ->addOption('bot-url', null, InputOption::VALUE_REQUIRED, 'The public HTTPS URL Telegram should send updates to')
+            ->addOption('bot-url', null, InputOption::VALUE_REQUIRED, 'The URL Telegram should send updates to (HTTPS, or HTTP with a local Bot API server)')
             ->addOption('webhook', null, InputOption::VALUE_NONE, 'Set the bot webhook after installation')
+            ->addOption('api-server', null, InputOption::VALUE_OPTIONAL, 'Run a local Bot API server. Possible values are: '.implode(', ', self::API_SERVERS), false)
             ->addOption('mtproto', null, InputOption::VALUE_NONE, 'Install MTProto for userbot / client development')
-            ->addOption('api-id', null, InputOption::VALUE_REQUIRED, 'The Telegram API ID from my.telegram.org')
-            ->addOption('api-hash', null, InputOption::VALUE_REQUIRED, 'The Telegram API hash from my.telegram.org')
+            ->addOption('api-id', null, InputOption::VALUE_REQUIRED, 'The Telegram API ID from my.telegram.org, used by the local Bot API server and MTProto')
+            ->addOption('api-hash', null, InputOption::VALUE_REQUIRED, 'The Telegram API hash from my.telegram.org, used by the local Bot API server and MTProto')
+            ->addOption('client-api-id', null, InputOption::VALUE_REQUIRED, 'A separate Telegram API ID for MTProto')
+            ->addOption('client-api-hash', null, InputOption::VALUE_REQUIRED, 'A separate Telegram API hash for MTProto')
+            ->addOption('api', null, InputOption::VALUE_NONE, 'Install the API routes file')
             ->addOption('database', null, InputOption::VALUE_REQUIRED, 'The database driver your application will use. Possible values are: '.implode(', ', self::DATABASE_DRIVERS))
             ->addOption('surge', null, InputOption::VALUE_OPTIONAL, 'Install LaraGram Surge with the given server. Possible values are: '.implode(', ', self::SURGE_SERVERS), false)
             ->addOption('react', null, InputOption::VALUE_NONE, 'Install the React Mini App starter kit')
@@ -151,10 +165,6 @@ class NewCommand extends Command
             );
         }
 
-        if (! $input->getOption('no-brain')) {
-            $input->setOption('brain', true);
-        }
-
         $form = form();
 
         if (! $input->getArgument('name')) {
@@ -179,95 +189,139 @@ class NewCommand extends Command
             );
         }
 
-        // Mini App starter kit...
-        if (! $this->usingStarterKit($input)) {
-            $form->select(
-                label: 'Would you like to build a Telegram Mini App?',
+        // Features...
+        $form->multiselect(
+            label: 'What would you like to configure?',
+            options: [
+                'bot' => 'Bot API',
+                'api-server' => 'Local Bot API server',
+                'mtproto' => 'MTProto (userbot / client)',
+                'tma' => 'Telegram Mini App',
+                'brain' => 'LaraGram Brain (AI assisted coding)',
+                'api' => 'API routes',
+                'surge' => 'LaraGram Surge',
+            ],
+            default: $this->defaultFeatures($input),
+            scroll: 7,
+            validate: fn (array $features) => in_array('mtproto', $features)
+                ? $this->missingExtensionsMessage('MTProto', self::MTPROTO_EXTENSIONS)
+                : null,
+            name: 'features',
+        );
+
+        $selected = fn (array $responses, string $feature) => in_array($feature, $responses['features'] ?? [], true);
+
+        // Local Bot API server...
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'api-server'),
+            fn ($responses, $previousResponse) => select(
+                label: 'Which Bot API server would you like to run?',
                 options: [
-                    'none' => 'No',
-                    'react' => 'Yes, with React',
-                    'vue' => 'Yes, with Vue',
-                    'svelte' => 'Yes, with Svelte',
+                    'official' => 'Telegram Bot API (telegram-bot-api)',
+                    'laragram' => 'LaraGram API Server (laraxgram/apiserver)',
                 ],
-                default: 'none',
-                name: 'starterKit',
-            );
-        }
+                default: $previousResponse ?? ($input->getOption('api-server') ?: 'official'),
+                validate: fn ($value) => $value === 'laragram' ? $this->laraGramApiServerRequirementsMessage() : null,
+                hint: 'The official server is a binary you install yourself; the LaraGram API Server is installed with Composer.',
+            ),
+            name: 'apiServer',
+        );
+
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'api-server') && ! $input->getOption('api-id'),
+            fn ($responses, $previousResponse) => $this->promptForApiId('What is your Telegram API ID?', $previousResponse),
+            name: 'apiId',
+        );
+
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'api-server') && ! $input->getOption('api-hash'),
+            fn () => $this->promptForApiHash('What is your Telegram API hash?'),
+            name: 'apiHash',
+        );
 
         // Bot API...
-        if (! $input->getOption('token')) {
-            $form->password(
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'bot') && ! $input->getOption('token'),
+            fn () => password(
                 label: 'What is your bot token?',
                 validate: fn ($value) => $value === '' ? null : $this->verifyBotToken($value),
                 hint: 'Get one from @BotFather, or press Enter to skip.',
-                name: 'token',
-            );
-        }
+            ),
+            name: 'token',
+        );
 
-        if (! $input->getOption('bot-url')) {
-            $form->addIf(
-                fn ($responses) => ($responses['token'] ?? $input->getOption('token')) !== '',
-                fn ($responses, $previousResponse) => text(
-                    label: 'What is the public URL of your bot?',
-                    placeholder: 'E.g. https://example.com',
-                    default: $previousResponse ?? '',
-                    validate: fn ($value) => $value === '' || $this->isValidWebhookUrl($value)
-                        ? null
-                        : 'The URL must be a valid HTTPS URL.',
-                    hint: 'Telegram sends updates to this URL. Press Enter to skip.',
-                ),
-                name: 'botUrl',
-            );
-        }
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'bot')
+                && ($responses['token'] ?? $input->getOption('token')) !== ''
+                && ! $input->getOption('bot-url'),
+            fn ($responses, $previousResponse) => text(
+                label: 'What is the URL of your bot?',
+                placeholder: $selected($responses, 'api-server') ? 'E.g. http://localhost:9000' : 'E.g. https://example.com',
+                default: $previousResponse ?? '',
+                validate: fn ($value) => $value === '' || $this->isValidWebhookUrl($value, $selected($responses, 'api-server'))
+                    ? null
+                    : ($selected($responses, 'api-server') ? 'The URL must be a valid HTTP or HTTPS URL.' : 'The URL must be a valid HTTPS URL.'),
+                hint: 'Telegram sends updates to this URL. Press Enter to skip.',
+            ),
+            name: 'botUrl',
+        );
 
-        if (! $input->getOption('webhook')) {
-            $form->addIf(
-                fn ($responses) => ($responses['token'] ?? $input->getOption('token')) !== ''
-                    && ($responses['botUrl'] ?? $input->getOption('bot-url')) !== '',
-                fn ($responses, $previousResponse) => confirm(
-                    label: 'Would you like to set the webhook after installation?',
-                    default: $previousResponse ?? true,
-                ),
-                name: 'webhook',
-            );
-        }
+        // A local Bot API server isn't running yet, so its webhook can only be set later...
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'bot')
+                && ! $selected($responses, 'api-server')
+                && ($responses['token'] ?? $input->getOption('token')) !== ''
+                && ($responses['botUrl'] ?? $input->getOption('bot-url')) !== ''
+                && ! $input->getOption('webhook'),
+            fn ($responses, $previousResponse) => confirm(
+                label: 'Would you like to set the webhook after installation?',
+                default: $previousResponse ?? true,
+            ),
+            name: 'webhook',
+        );
 
         // MTProto...
-        if (! $input->getOption('mtproto')) {
-            $form->confirm(
-                label: 'Would you like to use MTProto for userbot / client development?',
-                default: false,
-                validate: fn ($value) => $value ? $this->missingExtensionsMessage('MTProto', self::MTPROTO_EXTENSIONS) : null,
-                name: 'mtproto',
-            );
-        }
+        $hasServerCredentials = fn ($responses) => $selected($responses, 'api-server')
+            && ($responses['apiId'] ?? $input->getOption('api-id')) !== ''
+            && ($responses['apiHash'] ?? $input->getOption('api-hash')) !== '';
 
-        if (! $input->getOption('api-id')) {
-            $form->addIf(
-                fn ($responses) => $responses['mtproto'] ?? $input->getOption('mtproto'),
-                fn ($responses, $previousResponse) => text(
-                    label: 'What is your Telegram API ID?',
-                    default: $previousResponse ?? '',
-                    validate: fn ($value) => $value === '' || ctype_digit($value) ? null : 'The API ID must be numeric.',
-                    hint: 'Get it from my.telegram.org, or press Enter to skip.',
-                ),
-                name: 'apiId',
-            );
-        }
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'mtproto') && $hasServerCredentials($responses),
+            fn ($responses, $previousResponse) => confirm(
+                label: 'Would you like MTProto to use the same API ID and hash?',
+                default: $previousResponse ?? true,
+                hint: 'Choose "No" to give MTProto its own Telegram application.',
+            ),
+            name: 'sameCredentials',
+        );
 
-        if (! $input->getOption('api-hash')) {
-            $form->addIf(
-                fn ($responses) => $responses['mtproto'] ?? $input->getOption('mtproto'),
-                fn () => password(
-                    label: 'What is your Telegram API hash?',
-                    validate: fn ($value) => $value === '' || preg_match('/^[a-f0-9]{32}$/i', $value) === 1
-                        ? null
-                        : 'The API hash must be a 32 character hexadecimal string.',
-                    hint: 'Get it from my.telegram.org, or press Enter to skip.',
-                ),
-                name: 'apiHash',
-            );
-        }
+        $needsClientCredentials = fn ($responses) => $selected($responses, 'mtproto')
+            && (! $hasServerCredentials($responses) || ($responses['sameCredentials'] ?? true) === false);
+
+        $form->addIf(
+            fn ($responses) => $needsClientCredentials($responses)
+                && ! $input->getOption($selected($responses, 'api-server') ? 'client-api-id' : 'api-id'),
+            fn ($responses, $previousResponse) => $this->promptForApiId('What is the Telegram API ID for MTProto?', $previousResponse),
+            name: 'clientApiId',
+        );
+
+        $form->addIf(
+            fn ($responses) => $needsClientCredentials($responses)
+                && ! $input->getOption($selected($responses, 'api-server') ? 'client-api-hash' : 'api-hash'),
+            fn () => $this->promptForApiHash('What is the Telegram API hash for MTProto?'),
+            name: 'clientApiHash',
+        );
+
+        // Mini App starter kit...
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'tma') && ! $this->usingStarterKit($input),
+            fn ($responses, $previousResponse) => select(
+                label: 'Which frontend stack would you like to build your Mini App with?',
+                options: ['react' => 'React', 'vue' => 'Vue', 'svelte' => 'Svelte'],
+                default: $previousResponse ?? 'react',
+            ),
+            name: 'starterKit',
+        );
 
         // Database...
         if (! $input->getOption('database')) {
@@ -292,23 +346,26 @@ class NewCommand extends Command
             );
         }
 
-        // Surge...
-        if ($input->getOption('surge') === false) {
-            $form->select(
-                label: 'Would you like to use LaraGram Surge?',
+        // Surge... MTProto and the LaraGram API Server run on Surge with Swoole, so it's not asked for them.
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'surge')
+                && ! $selected($responses, 'mtproto')
+                && ($responses['apiServer'] ?? null) !== 'laragram'
+                && ! $input->getOption('surge'),
+            fn ($responses, $previousResponse) => select(
+                label: 'Which server would you like to use with LaraGram Surge?',
                 options: [
-                    'none' => 'No',
-                    'swoole' => 'Yes, with Swoole / OpenSwoole',
-                    'roadrunner' => 'Yes, with RoadRunner',
-                    'frankenphp' => 'Yes, with FrankenPHP',
+                    'swoole' => 'Swoole / OpenSwoole',
+                    'roadrunner' => 'RoadRunner',
+                    'frankenphp' => 'FrankenPHP',
                 ],
-                default: 'none',
+                default: $previousResponse ?? 'swoole',
                 validate: fn ($value) => $value === 'swoole' && ! $this->swooleIsAvailable()
                     ? 'The Swoole or OpenSwoole extension is required for this server.'
                     : null,
-                name: 'surge',
-            );
-        }
+            ),
+            name: 'surge',
+        );
 
         $responses = $form->submit();
 
@@ -322,12 +379,13 @@ class NewCommand extends Command
             );
         }
 
-        match ($responses['starterKit'] ?? 'none') {
-            'react' => $input->setOption('react', true),
-            'vue' => $input->setOption('vue', true),
-            'svelte' => $input->setOption('svelte', true),
-            default => null,
-        };
+        $features = $responses['features'] ?? [];
+
+        $this->configureBot = in_array('bot', $features, true);
+
+        if (in_array('api-server', $features, true)) {
+            $input->setOption('api-server', $responses['apiServer']);
+        }
 
         foreach (['token' => 'token', 'botUrl' => 'bot-url', 'apiId' => 'api-id', 'apiHash' => 'api-hash', 'database' => 'database'] as $response => $option) {
             if (($responses[$response] ?? '') !== '') {
@@ -339,17 +397,95 @@ class NewCommand extends Command
             $input->setOption('webhook', true);
         }
 
-        if ($responses['mtproto'] ?? false) {
+        if (in_array('mtproto', $features, true)) {
             $input->setOption('mtproto', true);
+
+            // Without a local Bot API server, MTProto's credentials are the application's credentials...
+            $prefix = in_array('api-server', $features, true) ? 'client-' : '';
+
+            foreach (['clientApiId' => 'api-id', 'clientApiHash' => 'api-hash'] as $response => $option) {
+                if (($responses[$response] ?? '') !== '') {
+                    $input->setOption($prefix.$option, $responses[$response]);
+                }
+            }
+        }
+
+        match ($responses['starterKit'] ?? null) {
+            'react' => $input->setOption('react', true),
+            'vue' => $input->setOption('vue', true),
+            'svelte' => $input->setOption('svelte', true),
+            default => null,
+        };
+
+        $input->setOption('brain', in_array('brain', $features, true));
+        $input->setOption('api', in_array('api', $features, true));
+
+        if (isset($responses['surge'])) {
+            $input->setOption('surge', $responses['surge']);
+        } elseif (in_array('surge', $features, true) && $input->getOption('surge') === false) {
+            $input->setOption('surge', null);
         }
 
         if (isset($responses['migrate'])) {
             $this->migrate = $responses['migrate'];
         }
+    }
 
-        if (isset($responses['surge'])) {
-            $input->setOption('surge', $responses['surge'] === 'none' ? false : $responses['surge']);
+    /**
+     * Get the features that are selected by default, including those given as options.
+     *
+     * @return list<string>
+     */
+    protected function defaultFeatures(InputInterface $input): array
+    {
+        return array_keys(array_filter([
+            'bot' => true,
+            'api-server' => $input->getOption('api-server') !== false,
+            'mtproto' => $input->getOption('mtproto'),
+            'tma' => $this->usingStarterKit($input),
+            'brain' => $input->getOption('brain'),
+            'api' => $input->getOption('api'),
+            'surge' => $input->getOption('surge') !== false,
+        ]));
+    }
+
+    /**
+     * Prompt for a Telegram API ID.
+     */
+    protected function promptForApiId(string $label, ?string $default = null): string
+    {
+        return text(
+            label: $label,
+            default: $default ?? '',
+            validate: fn ($value) => $value === '' || ctype_digit($value) ? null : 'The API ID must be numeric.',
+            hint: 'Get it from my.telegram.org, or press Enter to skip.',
+        );
+    }
+
+    /**
+     * Prompt for a Telegram API hash.
+     */
+    protected function promptForApiHash(string $label): string
+    {
+        return password(
+            label: $label,
+            validate: fn ($value) => $value === '' || preg_match('/^[a-f0-9]{32}$/i', $value) === 1
+                ? null
+                : 'The API hash must be a 32 character hexadecimal string.',
+            hint: 'Get it from my.telegram.org, or press Enter to skip.',
+        );
+    }
+
+    /**
+     * Get the error message for the missing requirements of the LaraGram API Server, if any.
+     */
+    protected function laraGramApiServerRequirementsMessage(): ?string
+    {
+        if (! $this->swooleIsAvailable()) {
+            return 'The LaraGram API Server requires the Swoole or OpenSwoole extension.';
         }
+
+        return $this->missingExtensionsMessage('The LaraGram API Server', self::MTPROTO_EXTENSIONS);
     }
 
     /**
@@ -712,6 +848,23 @@ class NewCommand extends Command
             throw new \InvalidArgumentException("Invalid database driver [{$input->getOption('database')}]. Possible values are: ".implode(', ', self::DATABASE_DRIVERS).'.');
         }
 
+        if ($input->getOption('api-server') !== false) {
+            $input->setOption('api-server', $input->getOption('api-server') ?: 'official');
+
+            if (! in_array($input->getOption('api-server'), self::API_SERVERS)) {
+                throw new \InvalidArgumentException("Invalid Bot API server [{$input->getOption('api-server')}]. Possible values are: ".implode(', ', self::API_SERVERS).'.');
+            }
+
+            if ($input->getOption('api-server') === 'laragram' && ($message = $this->laraGramApiServerRequirementsMessage())) {
+                throw new RuntimeException($message);
+            }
+        }
+
+        // MTProto and the LaraGram API Server run as Surge processes, which need Swoole...
+        if ($this->requiresSurge($input) && $input->getOption('surge') === false && $this->swooleIsAvailable()) {
+            $input->setOption('surge', 'swoole');
+        }
+
         if ($input->getOption('surge') !== false) {
             $input->setOption('surge', $input->getOption('surge') ?: 'swoole');
 
@@ -728,18 +881,36 @@ class NewCommand extends Command
             throw new RuntimeException($message);
         }
 
-        if (($url = $input->getOption('bot-url')) && ! $this->isValidWebhookUrl($url)) {
-            throw new \InvalidArgumentException("Invalid bot URL [{$url}]. The URL must be a valid HTTPS URL.");
+        $localApiServer = $input->getOption('api-server') !== false;
+
+        if (($url = $input->getOption('bot-url')) && ! $this->isValidWebhookUrl($url, $localApiServer)) {
+            throw new \InvalidArgumentException("Invalid bot URL [{$url}]. The URL must be a valid ".($localApiServer ? 'HTTP or HTTPS' : 'HTTPS').' URL.');
         }
 
         if ($input->getOption('webhook') && (! $input->getOption('token') || ! $input->getOption('bot-url'))) {
             throw new \InvalidArgumentException('The --webhook option requires both --token and --bot-url.');
         }
 
+        if ($input->getOption('webhook') && $localApiServer) {
+            throw new \InvalidArgumentException('The webhook of a local Bot API server can be set once the server is running, using the [webhook:set] command.');
+        }
+
+        if (($input->getOption('client-api-id') || $input->getOption('client-api-hash')) && (! $input->getOption('mtproto') || ! $localApiServer)) {
+            throw new \InvalidArgumentException('The --client-api-id and --client-api-hash options give MTProto its own credentials next to a local Bot API server; use --api-id and --api-hash otherwise.');
+        }
+
         // Interactive installs already verified the token while it was entered...
         if (($token = $input->getOption('token')) && $this->bot === null && ($error = $this->verifyBotToken($token))) {
             throw new \InvalidArgumentException($error);
         }
+    }
+
+    /**
+     * Determine if the selected packages run as Surge processes.
+     */
+    protected function requiresSurge(InputInterface $input): bool
+    {
+        return $input->getOption('mtproto') || $input->getOption('api-server') === 'laragram';
     }
 
     /**
@@ -753,10 +924,11 @@ class NewCommand extends Command
     {
         $composer = $this->findComposer();
 
-        // MTProto requires Surge itself, so Composer picks a Surge version MTProto supports...
+        // MTProto and the LaraGram API Server require Surge themselves, so Composer picks a Surge version they support...
         $packages = array_keys(array_filter([
-            'laraxgram/surge' => $input->getOption('surge') !== false && ! $input->getOption('mtproto'),
+            'laraxgram/surge' => $input->getOption('surge') !== false && ! $this->requiresSurge($input),
             'laraxgram/mtproto' => $input->getOption('mtproto'),
+            'laraxgram/apiserver' => $input->getOption('api-server') === 'laragram',
         ]));
 
         $devPackages = array_keys(array_filter([
@@ -825,7 +997,7 @@ class NewCommand extends Command
         }
 
         if ($input->getOption('mtproto')) {
-            $this->runCommands(
+            $process = $this->runCommands(
                 ['MTProto installed' => [
                     $this->phpBinary().' laragram install:client',
                     $this->phpBinary().' laragram vendor:publish --tag=mtproto-config',
@@ -835,7 +1007,39 @@ class NewCommand extends Command
                 workingPath: $directory,
                 taskLabel: 'Installing MTProto',
             );
+
+            if ($process->isSuccessful() && $input->getOption('client-api-id')) {
+                $this->useClientCredentials($directory);
+            }
         }
+
+        if ($input->getOption('api')) {
+            $this->runCommands(
+                ['API routes installed' => $this->phpBinary().' laragram install:api --no-interaction'],
+                $input,
+                $output,
+                workingPath: $directory,
+                taskLabel: 'Installing API routes',
+            );
+        }
+    }
+
+    /**
+     * Make MTProto read its own credentials, falling back to the application's.
+     */
+    protected function useClientCredentials(string $directory): void
+    {
+        $config = $directory.'/config/mtproto.php';
+
+        if (! file_exists($config)) {
+            return;
+        }
+
+        $this->replaceInFile(
+            ["env('API_ID', '')", "env('API_HASH', '')"],
+            ["env('CLIENT_API_ID', env('API_ID', ''))", "env('CLIENT_API_HASH', env('API_HASH', ''))"],
+            $config,
+        );
     }
 
     /**
@@ -856,6 +1060,10 @@ class NewCommand extends Command
             'BOT_USERID' => $this->bot['id'] ?? null,
             'API_ID' => $input->getOption('api-id'),
             'API_HASH' => $input->getOption('api-hash'),
+            'API_ENDPOINT' => $input->getOption('api-server') !== false ? self::LOCAL_API_SERVER_ENDPOINT : null,
+            'API_BINARY' => $input->getOption('api-server') === 'laragram' ? 'vendor/bin/laragram-server' : null,
+            'CLIENT_API_ID' => $input->getOption('client-api-id'),
+            'CLIENT_API_HASH' => $input->getOption('client-api-hash'),
         ], fn ($value) => $value !== null && $value !== ''));
 
         $this->configureDefaultDatabaseConnection(
@@ -1275,31 +1483,34 @@ class NewCommand extends Command
         $getStartedSteps = ["cd {$name}"];
 
         $missingEnvironmentValues = array_keys(array_filter([
-            'BOT_TOKEN' => ! $input->getOption('token'),
-            'BOT_URL' => ! $input->getOption('bot-url'),
+            'BOT_TOKEN' => $this->configureBot && ! $input->getOption('token'),
+            'BOT_URL' => $this->configureBot && ! $input->getOption('bot-url'),
+            'API_ID' => ($input->getOption('api-server') !== false || $input->getOption('mtproto')) && ! $input->getOption('api-id') && ! $input->getOption('client-api-id'),
+            'API_HASH' => ($input->getOption('api-server') !== false || $input->getOption('mtproto')) && ! $input->getOption('api-hash') && ! $input->getOption('client-api-hash'),
         ]));
 
         if ($missingEnvironmentValues !== []) {
-            $getStartedSteps[] = 'Set '.implode(' and ', $missingEnvironmentValues).' in the .env file';
+            $getStartedSteps[] = 'Set '.implode(', ', $missingEnvironmentValues).' in the .env file';
         }
 
         if ($this->usingStarterKit($input) && ! $runPackageManager) {
             $getStartedSteps[] = $packageManager->installCommand().' && '.$packageManager->buildCommand();
         }
 
-        if ($input->getOption('mtproto')) {
-            $getStartedSteps[] = 'php laragram client:auth';
-            $getStartedSteps[] = 'php laragram client:start';
+        if ($input->getOption('api-server') === 'official') {
+            $getStartedSteps[] = 'Install the telegram-bot-api binary: '.Element::link('https://github.com/tdlib/telegram-bot-api');
         }
 
-        $getStartedSteps[] = match (true) {
-            $input->getOption('surge') !== false => 'php laragram surge:start',
-            $runPackageManager => 'composer run dev',
-            default => 'php laragram serve',
-        };
+        if ($input->getOption('mtproto')) {
+            $getStartedSteps[] = 'php laragram client:auth';
+        }
 
-        if (! $input->getOption('webhook')) {
-            $getStartedSteps[] = 'php laragram webhook:set';
+        $getStartedSteps[] = 'php laragram dev';
+
+        if ($this->configureBot && ! $input->getOption('webhook')) {
+            $getStartedSteps[] = $input->getOption('api-server') !== false
+                ? 'php laragram webhook:set (once the Bot API server is running)'
+                : 'php laragram webhook:set';
         }
 
         callout(

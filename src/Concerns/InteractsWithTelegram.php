@@ -86,10 +86,12 @@ trait InteractsWithTelegram
 
     /**
      * Determine if the given value is a valid webhook URL.
+     *
+     * A local Bot API server also accepts plain HTTP webhooks.
      */
-    protected function isValidWebhookUrl(string $url): bool
+    protected function isValidWebhookUrl(string $url, bool $allowHttp = false): bool
     {
         return filter_var($url, FILTER_VALIDATE_URL) !== false
-            && str_starts_with(strtolower($url), 'https://');
+            && (str_starts_with(strtolower($url), 'https://') || ($allowHttp && str_starts_with(strtolower($url), 'http://')));
     }
 }
