@@ -24,6 +24,7 @@ use Throwable;
 use function LaraGram\Console\Prompts\callout;
 use function LaraGram\Console\Prompts\confirm;
 use function LaraGram\Console\Prompts\form;
+use function LaraGram\Console\Prompts\multiselect;
 use function LaraGram\Console\Prompts\password;
 use function LaraGram\Console\Prompts\select;
 use function LaraGram\Console\Prompts\task;
@@ -44,6 +45,10 @@ class NewCommand extends Command
     const LOCAL_API_SERVER_ENDPOINT = 'http://127.0.0.1:8081';
 
     const MTPROTO_EXTENSIONS = ['gmp', 'json', 'mbstring', 'openssl', 'sockets', 'zlib'];
+
+    const ARMADA_SERVICES = ['mysql', 'pgsql', 'mariadb', 'mongodb', 'redis', 'valkey', 'memcached'];
+
+    const ARMADA_PHP_VERSIONS = ['8.3', '8.4', '8.5'];
 
     /**
      * The Composer instance.
@@ -129,6 +134,8 @@ class NewCommand extends Command
             ->addOption('api', null, InputOption::VALUE_NONE, 'Install the API routes file')
             ->addOption('database', null, InputOption::VALUE_REQUIRED, 'The database driver your application will use. Possible values are: '.implode(', ', self::DATABASE_DRIVERS))
             ->addOption('surge', null, InputOption::VALUE_OPTIONAL, 'Install LaraGram Surge with the given server. Possible values are: '.implode(', ', self::SURGE_SERVERS), false)
+            ->addOption('armada', null, InputOption::VALUE_NONE, 'Install LaraGram Armada to run the application with Docker')
+            ->addOption('armada-services', null, InputOption::VALUE_REQUIRED, 'The services Armada should run, comma separated, or "none". Possible values are: '.implode(', ', self::ARMADA_SERVICES))
             ->addOption('react', null, InputOption::VALUE_NONE, 'Install the React Mini App starter kit')
             ->addOption('svelte', null, InputOption::VALUE_NONE, 'Install the Svelte Mini App starter kit')
             ->addOption('vue', null, InputOption::VALUE_NONE, 'Install the Vue Mini App starter kit')
@@ -200,9 +207,10 @@ class NewCommand extends Command
                 'brain' => 'LaraGram Brain (AI assisted coding)',
                 'api' => 'API routes',
                 'surge' => 'LaraGram Surge',
+                'armada' => 'LaraGram Armada (Docker)',
             ],
             default: $this->defaultFeatures($input),
-            scroll: 7,
+            scroll: 8,
             validate: fn (array $features) => in_array('mtproto', $features)
                 ? $this->missingExtensionsMessage('MTProto', self::MTPROTO_EXTENSIONS)
                 : null,
@@ -221,8 +229,11 @@ class NewCommand extends Command
                     'laragram' => 'LaraGram API Server (laraxgram/apiserver)',
                 ],
                 default: $previousResponse ?? ($input->getOption('api-server') ?: 'official'),
-                validate: fn ($value) => $value === 'laragram' ? $this->laraGramApiServerRequirementsMessage() : null,
-                hint: 'The official server is a binary you install yourself; the LaraGram API Server is installed with Composer.',
+                // With Armada, the server runs in its own container...
+                validate: fn ($value) => $value === 'laragram' && ! $selected($responses, 'armada') ? $this->laraGramApiServerRequirementsMessage() : null,
+                hint: $selected($responses, 'armada')
+                    ? 'Armada runs the selected server in its own container.'
+                    : 'The official server is a binary you install yourself; the LaraGram API Server is installed with Composer.',
             ),
             name: 'apiServer',
         );
@@ -325,18 +336,22 @@ class NewCommand extends Command
 
         // Database...
         if (! $input->getOption('database')) {
-            $form->select(
-                label: 'Which database will your application use?',
-                options: $this->databaseOptions(),
-                default: 'sqlite',
-                validate: fn ($value) => extension_loaded($this->pdoExtension($value))
-                    ? null
-                    : "The [{$this->pdoExtension($value)}] extension is required for this database.",
+            // With Armada, a database server runs in a container that is reached from the application container...
+            $form->add(
+                fn ($responses) => select(
+                    label: 'Which database will your application use?',
+                    options: $this->databaseOptions(),
+                    default: 'sqlite',
+                    validate: fn ($value) => $selected($responses, 'armada') || extension_loaded($this->pdoExtension($value))
+                        ? null
+                        : "The [{$this->pdoExtension($value)}] extension is required for this database.",
+                ),
                 name: 'database',
             );
 
+            // ...so its migrations run once the containers are up...
             $form->addIf(
-                fn ($responses) => $responses['database'] !== 'sqlite',
+                fn ($responses) => $responses['database'] !== 'sqlite' && ! $selected($responses, 'armada'),
                 fn ($responses, $previousResponse) => confirm(
                     label: 'Would you like to run the default database migrations?',
                     default: $previousResponse ?? true,
@@ -365,6 +380,27 @@ class NewCommand extends Command
                     : null,
             ),
             name: 'surge',
+        );
+
+        // Armada...
+        $form->addIf(
+            fn ($responses) => $selected($responses, 'armada') && ! $input->getOption('armada-services'),
+            fn ($responses, $previousResponse) => multiselect(
+                label: 'Which services should Armada run?',
+                options: [
+                    'mysql' => 'MySQL',
+                    'pgsql' => 'PostgreSQL',
+                    'mariadb' => 'MariaDB',
+                    'mongodb' => 'MongoDB',
+                    'redis' => 'Redis',
+                    'valkey' => 'Valkey',
+                    'memcached' => 'Memcached',
+                ],
+                default: $previousResponse ?? $this->defaultArmadaServices($responses['database'] ?? $input->getOption('database')),
+                scroll: 7,
+                hint: 'The application and the selected Bot API server always run in their own containers.',
+            ),
+            name: 'armadaServices',
         );
 
         $responses = $form->submit();
@@ -429,6 +465,12 @@ class NewCommand extends Command
         if (isset($responses['migrate'])) {
             $this->migrate = $responses['migrate'];
         }
+
+        $input->setOption('armada', in_array('armada', $features, true));
+
+        if (isset($responses['armadaServices'])) {
+            $input->setOption('armada-services', $responses['armadaServices'] === [] ? 'none' : implode(',', $responses['armadaServices']));
+        }
     }
 
     /**
@@ -446,7 +488,45 @@ class NewCommand extends Command
             'brain' => $input->getOption('brain'),
             'api' => $input->getOption('api'),
             'surge' => $input->getOption('surge') !== false,
+            'armada' => $input->getOption('armada'),
         ]));
+    }
+
+    /**
+     * Get the Armada services that match the given database driver.
+     *
+     * @return list<string>
+     */
+    protected function defaultArmadaServices(?string $database): array
+    {
+        return array_values(array_filter([
+            in_array($database, ['mysql', 'pgsql', 'mariadb'], true) ? $database : null,
+            'redis',
+        ]));
+    }
+
+    /**
+     * Get the services Armada should run.
+     *
+     * @return list<string>
+     */
+    protected function armadaServices(InputInterface $input): array
+    {
+        $services = $input->getOption('armada-services');
+
+        if ($services === null || $services === '') {
+            return $this->defaultArmadaServices($input->getOption('database') ?: 'sqlite');
+        }
+
+        return $services === 'none' ? [] : array_values(array_filter(array_map('trim', explode(',', $services))));
+    }
+
+    /**
+     * Determine if the local Bot API server runs on the host, rather than in an Armada container.
+     */
+    protected function runsApiServerOnHost(InputInterface $input): bool
+    {
+        return $input->getOption('api-server') !== false && ! $input->getOption('armada');
     }
 
     /**
@@ -855,7 +935,7 @@ class NewCommand extends Command
                 throw new \InvalidArgumentException("Invalid Bot API server [{$input->getOption('api-server')}]. Possible values are: ".implode(', ', self::API_SERVERS).'.');
             }
 
-            if ($input->getOption('api-server') === 'laragram' && ($message = $this->laraGramApiServerRequirementsMessage())) {
+            if ($input->getOption('api-server') === 'laragram' && ! $input->getOption('armada') && ($message = $this->laraGramApiServerRequirementsMessage())) {
                 throw new RuntimeException($message);
             }
         }
@@ -899,6 +979,22 @@ class NewCommand extends Command
             throw new \InvalidArgumentException('The --client-api-id and --client-api-hash options give MTProto its own credentials next to a local Bot API server; use --api-id and --api-hash otherwise.');
         }
 
+        if ($input->getOption('armada-services') && ! $input->getOption('armada')) {
+            throw new \InvalidArgumentException('The --armada-services option requires the --armada option.');
+        }
+
+        if ($input->getOption('armada')) {
+            if ($invalid = array_diff($this->armadaServices($input), self::ARMADA_SERVICES)) {
+                throw new \InvalidArgumentException('Invalid Armada services ['.implode(', ', $invalid).']. Possible values are: '.implode(', ', self::ARMADA_SERVICES).'.');
+            }
+
+            // The database server runs in a container, which is reached once Armada is up...
+            if (($input->getOption('database') ?: 'sqlite') !== 'sqlite'
+                || array_intersect(['mysql', 'pgsql', 'mariadb'], $this->armadaServices($input))) {
+                $this->migrate = false;
+            }
+        }
+
         // Interactive installs already verified the token while it was entered...
         if (($token = $input->getOption('token')) && $this->bot === null && ($error = $this->verifyBotToken($token))) {
             throw new \InvalidArgumentException($error);
@@ -910,7 +1006,7 @@ class NewCommand extends Command
      */
     protected function requiresSurge(InputInterface $input): bool
     {
-        return $input->getOption('mtproto') || $input->getOption('api-server') === 'laragram';
+        return $input->getOption('mtproto') || ($input->getOption('api-server') === 'laragram' && ! $input->getOption('armada'));
     }
 
     /**
@@ -928,11 +1024,13 @@ class NewCommand extends Command
         $packages = array_keys(array_filter([
             'laraxgram/surge' => $input->getOption('surge') !== false && ! $this->requiresSurge($input),
             'laraxgram/mtproto' => $input->getOption('mtproto'),
-            'laraxgram/apiserver' => $input->getOption('api-server') === 'laragram',
+            // Armada runs the LaraGram API Server from its own image...
+            'laraxgram/apiserver' => $input->getOption('api-server') === 'laragram' && ! $input->getOption('armada'),
         ]));
 
         $devPackages = array_keys(array_filter([
             'laraxgram/brain' => $input->getOption('brain') && ! $input->getOption('no-brain'),
+            'laraxgram/armada' => $input->getOption('armada'),
         ]));
 
         if ($packages === [] && $devPackages === []) {
@@ -1022,6 +1120,41 @@ class NewCommand extends Command
                 taskLabel: 'Installing API routes',
             );
         }
+
+        // Armada is installed last, so it sees every other package of the application...
+        if ($input->getOption('armada')) {
+            $this->runCommands(
+                ['Armada installed' => $this->armadaInstallCommand($input)],
+                $input,
+                $output,
+                workingPath: $directory,
+                taskLabel: 'Installing LaraGram Armada',
+            );
+        }
+    }
+
+    /**
+     * Build the armada:install command for the selected features.
+     */
+    protected function armadaInstallCommand(InputInterface $input): string
+    {
+        $services = $this->armadaServices($input);
+
+        // A Bot API server in a container reaches the application directly, so it always uses a webhook...
+        $updates = $input->getOption('api-server') !== false || $input->getOption('bot-url') ? 'webhook' : 'polling';
+
+        $options = [
+            '--with='.($services === [] ? 'none' : implode(',', $services)),
+            '--bot-api='.($input->getOption('api-server') ?: 'cloud'),
+            '--server='.($input->getOption('surge') !== false ? 'surge' : 'serve'),
+            '--updates='.$updates,
+        ];
+
+        if (in_array($php = PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION, self::ARMADA_PHP_VERSIONS, true)) {
+            $options[] = '--php='.$php;
+        }
+
+        return $this->phpBinary().' laragram armada:install '.implode(' ', $options).' --no-interaction';
     }
 
     /**
@@ -1061,7 +1194,7 @@ class NewCommand extends Command
             'API_ID' => $input->getOption('api-id'),
             'API_HASH' => $input->getOption('api-hash'),
             'API_ENDPOINT' => $input->getOption('api-server') !== false ? self::LOCAL_API_SERVER_ENDPOINT : null,
-            'API_BINARY' => $input->getOption('api-server') === 'laragram' ? 'vendor/bin/laragram-server' : null,
+            'API_BINARY' => $input->getOption('api-server') === 'laragram' && ! $input->getOption('armada') ? 'vendor/bin/laragram-server' : null,
             'CLIENT_API_ID' => $input->getOption('client-api-id'),
             'CLIENT_API_HASH' => $input->getOption('client-api-hash'),
         ], fn ($value) => $value !== null && $value !== ''));
@@ -1497,20 +1630,10 @@ class NewCommand extends Command
             $getStartedSteps[] = $packageManager->installCommand().' && '.$packageManager->buildCommand();
         }
 
-        if ($input->getOption('api-server') === 'official') {
-            $getStartedSteps[] = 'Install the telegram-bot-api binary: '.Element::link('https://github.com/tdlib/telegram-bot-api');
-        }
-
-        if ($input->getOption('mtproto')) {
-            $getStartedSteps[] = 'php laragram client:auth';
-        }
-
-        $getStartedSteps[] = 'php laragram dev';
-
-        if ($this->configureBot && ! $input->getOption('webhook')) {
-            $getStartedSteps[] = $input->getOption('api-server') !== false
-                ? 'php laragram webhook:set (once the Bot API server is running)'
-                : 'php laragram webhook:set';
+        if ($input->getOption('armada')) {
+            $this->addArmadaSteps($getStartedSteps, $input);
+        } else {
+            $this->addLocalSteps($getStartedSteps, $input);
         }
 
         callout(
@@ -1526,6 +1649,56 @@ class NewCommand extends Command
                 Element::heading('Build something amazing!'),
             ],
         );
+    }
+
+    /**
+     * Add the steps that start the application on the host.
+     *
+     * @param  list<string>  $steps
+     */
+    protected function addLocalSteps(array &$steps, InputInterface $input): void
+    {
+        if ($input->getOption('api-server') === 'official') {
+            $steps[] = 'Install the telegram-bot-api binary: '.Element::link('https://github.com/tdlib/telegram-bot-api');
+        }
+
+        if ($input->getOption('mtproto')) {
+            $steps[] = 'php laragram client:auth';
+        }
+
+        $steps[] = 'php laragram dev';
+
+        if ($this->configureBot && ! $input->getOption('webhook')) {
+            $steps[] = $input->getOption('api-server') !== false
+                ? 'php laragram webhook:set (once the Bot API server is running)'
+                : 'php laragram webhook:set';
+        }
+    }
+
+    /**
+     * Add the steps that start the application with Armada.
+     *
+     * @param  list<string>  $steps
+     */
+    protected function addArmadaSteps(array &$steps, InputInterface $input): void
+    {
+        $steps[] = './vendor/bin/armada up -d';
+
+        if (! $this->migrate && array_intersect(['mysql', 'pgsql', 'mariadb'], $this->armadaServices($input))) {
+            $steps[] = './vendor/bin/armada laragram migrate';
+        }
+
+        if ($input->getOption('api-server') !== false) {
+            $steps[] = './vendor/bin/armada bot-api logout (once, to log the bot out of the cloud Bot API)';
+        }
+
+        if ($input->getOption('mtproto')) {
+            $steps[] = './vendor/bin/armada laragram client:auth';
+        }
+
+        if ($this->configureBot && ! $input->getOption('webhook') && ($input->getOption('api-server') !== false || $input->getOption('bot-url'))) {
+            $steps[] = './vendor/bin/armada laragram webhook:set';
+        }
     }
 
     /**
