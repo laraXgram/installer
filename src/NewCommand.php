@@ -48,7 +48,14 @@ class NewCommand extends Command
 
     const ARMADA_SERVICES = ['mysql', 'pgsql', 'mariadb', 'mongodb', 'redis', 'valkey', 'memcached'];
 
-    const ARMADA_PHP_VERSIONS = ['8.3', '8.4', '8.5'];
+    const ARMADA_PHP_VERSIONS = ['8.3', '8.4', '8.5', '8.6'];
+
+    /**
+     * The Armada PHP versions Swoole has no release for yet, so Surge can't run on them.
+     *
+     * @var array<int, string>
+     */
+    const ARMADA_PHP_VERSIONS_WITHOUT_SWOOLE = ['8.6'];
 
     /**
      * The Composer instance.
@@ -1150,7 +1157,13 @@ class NewCommand extends Command
             '--updates='.$updates,
         ];
 
-        if (in_array($php = PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION, self::ARMADA_PHP_VERSIONS, true)) {
+        $php = PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;
+
+        // Surge needs Swoole, so a PHP version without it keeps Armada's default instead...
+        $surgeWithoutSwoole = $input->getOption('surge') === 'swoole'
+            && in_array($php, self::ARMADA_PHP_VERSIONS_WITHOUT_SWOOLE, true);
+
+        if (in_array($php, self::ARMADA_PHP_VERSIONS, true) && ! $surgeWithoutSwoole) {
             $options[] = '--php='.$php;
         }
 
